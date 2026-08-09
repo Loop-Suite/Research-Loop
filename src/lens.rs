@@ -5,7 +5,8 @@ use crate::spec::{Lens, Spec};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub const LENS_SYSTEM: &str = "You are an analyst verifying a market/competitor research document. \
+pub const LENS_SYSTEM: &str =
+    "You are an analyst verifying a market/competitor research document. \
 Unsubstantiated suspicions are not findings — file them as unverified instead. \
 Only flag claims actually stated in the document; do not speculate about content that isn't there. \
 Respond strictly in the specified JSON schema.";
@@ -96,8 +97,15 @@ pub fn select_lenses(llm: &Llm, spec: &Spec, input: &Input) -> Result<Vec<String
     let catalog = optional
         .iter()
         .map(|l| {
-            let who = if l.persona_name.is_empty() { l.title.clone() } else { format!("{} ({})", l.title, l.persona_name) };
-            format!("- id=\"{}\" | {} — selection signal: {}", l.id, who, l.signal)
+            let who = if l.persona_name.is_empty() {
+                l.title.clone()
+            } else {
+                format!("{} ({})", l.title, l.persona_name)
+            };
+            format!(
+                "- id=\"{}\" | {} — selection signal: {}",
+                l.id, who, l.signal
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -114,13 +122,20 @@ pub fn select_lenses(llm: &Llm, spec: &Spec, input: &Input) -> Result<Vec<String
     let selected: Vec<String> = v
         .get("selected")
         .and_then(|s| s.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     let valid: Vec<String> = selected
         .into_iter()
         .filter(|id| spec.lens_by_id(id).is_some())
         .collect();
-    anyhow::ensure!(!valid.is_empty(), "Lens selection result is empty, or contains only ids not present in the spec");
+    anyhow::ensure!(
+        !valid.is_empty(),
+        "Lens selection result is empty, or contains only ids not present in the spec"
+    );
     Ok(valid)
 }
 
@@ -154,9 +169,13 @@ pub fn review_lens(llm: &Llm, spec: &Spec, input: &Input, lens_id: &str) -> Resu
     let v = llm
         .json_ctx(Some(&ctx), &task, Some(&system))
         .with_context(|| format!("Lens review failed: {lens_id}"))?;
-    let mut out: LensOutput =
-        serde_json::from_value(v).with_context(|| format!("Lens review JSON schema mismatch: {lens_id}"))?;
-    let reviewer = if lens.persona_name.is_empty() { lens.title.clone() } else { lens.persona_name.clone() };
+    let mut out: LensOutput = serde_json::from_value(v)
+        .with_context(|| format!("Lens review JSON schema mismatch: {lens_id}"))?;
+    let reviewer = if lens.persona_name.is_empty() {
+        lens.title.clone()
+    } else {
+        lens.persona_name.clone()
+    };
     for (i, f) in out.findings.iter_mut().enumerate() {
         f.id = format!("{}-{}", lens_id, i + 1);
         f.lens = lens_id.to_string();
@@ -180,7 +199,9 @@ pub fn review_good_things(llm: &Llm, spec: &Spec, input: &Input) -> Result<GoodT
          If there is no concrete example to cite as evidence, return good_things as an empty array.\n",
         guide = GOOD_THINGS_GUIDE,
     );
-    let v = llm.json_ctx(Some(&ctx), &task, Some(LENS_SYSTEM)).context("Good Things lens failed")?;
+    let v = llm
+        .json_ctx(Some(&ctx), &task, Some(LENS_SYSTEM))
+        .context("Good Things lens failed")?;
     let out: GoodThingsOutput =
         serde_json::from_value(v).context("Good Things JSON schema mismatch")?;
     Ok(out)

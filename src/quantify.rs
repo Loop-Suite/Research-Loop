@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 pub struct QuantSummary {
     pub verdict: String, // PASS|REVISE — docs/design-spec.md §6 (simplified from codereview's 4-state verdict)
-    pub score: i64,       // 0-100
+    pub score: i64,      // 0-100
     pub score_deductions: Vec<String>,
     pub coverage_gap_count: usize,
 }
@@ -30,7 +30,10 @@ fn score(findings: &[Finding], resolved: &HashMap<String, Resolution>) -> (i64, 
         if resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED") {
             let p = severity_penalty(&f.severity);
             total -= p;
-            deductions.push(format!("[{}] {} -{} pts — {}", f.severity, f.section, p, f.claim));
+            deductions.push(format!(
+                "[{}] {} -{} pts — {}",
+                f.severity, f.section, p, f.claim
+            ));
         }
     }
     (total.max(0), deductions)
@@ -48,7 +51,12 @@ fn score(findings: &[Finding], resolved: &HashMap<String, Resolution>) -> (i64, 
 /// #7: If even one resolution has needs_human_review set (a finding that came back UNKNOWN/REVERSED
 /// from a --prior re-check), it forces REVISE regardless of that finding's severity — "unable to
 /// verify" is never auto-passed.
-fn verdict(findings: &[Finding], resolved: &HashMap<String, Resolution>, checks: &[CheckResult], coverage_gap_count: usize) -> String {
+fn verdict(
+    findings: &[Finding],
+    resolved: &HashMap<String, Resolution>,
+    checks: &[CheckResult],
+    coverage_gap_count: usize,
+) -> String {
     // Priority 1: deterministic check FAIL — always takes precedence, regardless of findings/confidence.
     if checks.iter().any(|c| c.status == CheckStatus::Fail) {
         return "REVISE".to_string();
@@ -63,7 +71,10 @@ fn verdict(findings: &[Finding], resolved: &HashMap<String, Resolution>, checks:
         .filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED"))
         .collect();
 
-    if confirmed.iter().any(|f| f.severity == "P0" || f.severity == "P1") {
+    if confirmed
+        .iter()
+        .any(|f| f.severity == "P0" || f.severity == "P1")
+    {
         return "REVISE".to_string();
     }
     if coverage_gap_count > 0 {
@@ -81,7 +92,12 @@ pub fn summarize(
 ) -> QuantSummary {
     let (sc, deductions) = score(findings, resolved);
     let v = verdict(findings, resolved, checks, coverage_gap_count);
-    QuantSummary { verdict: v, score: sc, score_deductions: deductions, coverage_gap_count }
+    QuantSummary {
+        verdict: v,
+        score: sc,
+        score_deductions: deductions,
+        coverage_gap_count,
+    }
 }
 
 #[cfg(test)]

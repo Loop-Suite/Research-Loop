@@ -38,7 +38,8 @@ struct AngleCheckOutput {
 /// Markdown list AST parser, but the deterministic line-by-line breakdown resolves the
 /// "LLM judges the whole thing at once" problem).
 fn parse_requirements(brief: &str) -> Vec<(String, String)> {
-    let marker_re = Regex::new(r"^\s*(?:[-*•]|\(?\d+[.)])\s+").expect("failed to compile requirement marker regex");
+    let marker_re = Regex::new(r"^\s*(?:[-*•]|\(?\d+[.)])\s+")
+        .expect("failed to compile requirement marker regex");
     let mut items: Vec<String> = Vec::new();
     for line in brief.lines() {
         let trimmed = line.trim();
@@ -59,7 +60,12 @@ fn parse_requirements(brief: &str) -> Vec<(String, String)> {
 }
 
 /// Returns None when requirements (the brief) are not provided (nothing to verify — no N/A listing).
-pub fn verify(llm: &Llm, spec: &Spec, input: &Input, confirmed: &[&Finding]) -> Result<Option<Vec<AngleCheck>>> {
+pub fn verify(
+    llm: &Llm,
+    spec: &Spec,
+    input: &Input,
+    confirmed: &[&Finding],
+) -> Result<Option<Vec<AngleCheck>>> {
     let brief = match &input.requirements {
         None => return Ok(None),
         Some(b) => b,
@@ -69,7 +75,11 @@ pub fn verify(llm: &Llm, spec: &Spec, input: &Input, confirmed: &[&Finding]) -> 
         return Ok(Some(Vec::new()));
     }
 
-    let req_list = reqs.iter().map(|(id, text)| format!("- {id}: {text}")).collect::<Vec<_>>().join("\n");
+    let req_list = reqs
+        .iter()
+        .map(|(id, text)| format!("- {id}: {text}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let findings_summary = confirmed
         .iter()
         .map(|f| format!("- [{}] {} — {}", f.severity, f.section, f.claim))
@@ -87,8 +97,11 @@ pub fn verify(llm: &Llm, spec: &Spec, input: &Input, confirmed: &[&Finding]) -> 
         req_list = req_list,
         fs = if findings_summary.is_empty() { "(none)".to_string() } else { findings_summary },
     );
-    let v = llm.json_ctx(Some(&ctx), &task, Some(REQ_SYSTEM)).context("angle coverage verification failed")?;
-    let out: AngleCheckOutput = serde_json::from_value(v).context("angle coverage JSON schema mismatch")?;
+    let v = llm
+        .json_ctx(Some(&ctx), &task, Some(REQ_SYSTEM))
+        .context("angle coverage verification failed")?;
+    let out: AngleCheckOutput =
+        serde_json::from_value(v).context("angle coverage JSON schema mismatch")?;
 
     // Deterministic cross-check: only trust req_ids the LLM returned that are in the list we gave it;
     // any REQ-ID missing from the response is forced to MISSING by the code — this prevents the model

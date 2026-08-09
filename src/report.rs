@@ -26,7 +26,12 @@ fn checks_table(checks: &[CheckResult]) -> String {
     let mut md = String::new();
     md.push_str("| Check | Status | Evidence |\n|---|---|---|\n");
     for c in checks {
-        md.push_str(&format!("| {} | {} | {} |\n", c.title, c.status.label(), c.evidence));
+        md.push_str(&format!(
+            "| {} | {} | {} |\n",
+            c.title,
+            c.status.label(),
+            c.evidence
+        ));
     }
     md
 }
@@ -52,13 +57,29 @@ pub struct ReportCtx<'a> {
 
 pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
     let ReportCtx {
-        out_dir, spec, input, selected_lenses, round, findings, resolved, unverified, good_things,
-        checks, angles, coverage_gaps, audit, quant, fix_results,
+        out_dir,
+        spec,
+        input,
+        selected_lenses,
+        round,
+        findings,
+        resolved,
+        unverified,
+        good_things,
+        checks,
+        angles,
+        coverage_gaps,
+        audit,
+        quant,
+        fix_results,
     } = ctx;
 
     let mut md = String::new();
 
-    md.push_str(&format!("# Research Document Verification — {} (round {})\n\n", spec.name, round));
+    md.push_str(&format!(
+        "# Research Document Verification — {} (round {})\n\n",
+        spec.name, round
+    ));
     md.push_str(&format!(
         "**Verdict: {}**  ·  Score: {}/100  ·  {} sections · {} words · {} citations\n\n",
         quant.verdict,
@@ -67,14 +88,25 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
         input.word_count,
         input.citations.len(),
     ));
-    md.push_str(&format!("Selected lenses: {}\n\n", selected_lenses.join(", ")));
+    md.push_str(&format!(
+        "Selected lenses: {}\n\n",
+        selected_lenses.join(", ")
+    ));
 
     if !fix_results.is_empty() {
-        md.push_str("## Compared to previous round\n\n| Finding | Status | Evidence |\n|---|---|---|\n");
+        md.push_str(
+            "## Compared to previous round\n\n| Finding | Status | Evidence |\n|---|---|---|\n",
+        );
         for f in fix_results {
-            md.push_str(&format!("| {} | {} | {} |\n", f.finding_id, f.status, f.evidence));
+            md.push_str(&format!(
+                "| {} | {} | {} |\n",
+                f.finding_id, f.status, f.evidence
+            ));
         }
-        let reversed = fix_results.iter().filter(|f| f.status == "REVERSED").count();
+        let reversed = fix_results
+            .iter()
+            .filter(|f| f.status == "REVERSED")
+            .count();
         if reversed > 0 {
             md.push_str(&format!("\n⚠️ {} finding(s) REVERSED — a conclusion from the previous round was overturned by newer evidence (e.g. the T-Order/KT case pattern). Re-review the affected sections first.\n", reversed));
         }
@@ -94,7 +126,10 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
             md.push_str(&format!("  - {}\n", d));
         }
     }
-    md.push_str(&format!("- Coverage gaps: {}\n\n", quant.coverage_gap_count));
+    md.push_str(&format!(
+        "- Coverage gaps: {}\n\n",
+        quant.coverage_gap_count
+    ));
 
     md.push_str("## Coverage Verification (whether research brief angles are satisfied)\n\n");
     md.push_str("REQ IDs are deterministically numbered by code from the brief — any REQ ID the LLM omits is forced to MISSING by code (#8).\n\n");
@@ -104,7 +139,10 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
         Some(list) => {
             md.push_str("| REQ ID | Angle | Status | Evidence or gap |\n|---|---|---|---|\n");
             for a in list {
-                md.push_str(&format!("| {} | {} | {} | {} |\n", a.req_id, a.angle, a.status, a.evidence));
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    a.req_id, a.angle, a.status, a.evidence
+                ));
             }
             md.push('\n');
         }
@@ -127,14 +165,21 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
     // computes it directly via an actual HTTP re-fetch + citation-text comparison (#4). Based on CONFIRMED findings.
     let mut citation_summary: HashMap<&str, usize> = HashMap::new();
     for f in &confirmed {
-        *citation_summary.entry(f.citation_status.as_str()).or_insert(0) += 1;
+        *citation_summary
+            .entry(f.citation_status.as_str())
+            .or_insert(0) += 1;
     }
     md.push_str("## Citation Status Summary (computed by code via actual source re-fetch/comparison, not LLM judgment)\n\n");
     if citation_summary.is_empty() {
         md.push_str("(No confirmed findings)\n\n");
     } else {
         md.push_str("| Status | Count |\n|---|---|\n");
-        for k in ["UNFETCHED", "FETCH_FAILED", "QUOTE_MATCHED", "QUOTE_NOT_FOUND"] {
+        for k in [
+            "UNFETCHED",
+            "FETCH_FAILED",
+            "QUOTE_MATCHED",
+            "QUOTE_NOT_FOUND",
+        ] {
             let n = citation_summary.get(k).copied().unwrap_or(0);
             md.push_str(&format!("| {} | {} |\n", k, n));
         }
@@ -150,14 +195,27 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
     for f in &confirmed {
         let r = resolved.get(&f.id);
         let discourse_result = match r {
-            Some(res) if res.needs_human_review => format!("\u{26a0} HUMAN REVIEW REQUIRED — {}", res.reason),
+            Some(res) if res.needs_human_review => {
+                format!("\u{26a0} HUMAN REVIEW REQUIRED — {}", res.reason)
+            }
             Some(res) => res.reason.clone(),
             None => String::new(),
         };
         md.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            f.id, f.severity, f.label, f.lens, f.reviewer, f.section, f.citation_ref, f.citation_status,
-            f.llm_citation_status, f.claim, f.evidence, f.recommendation, discourse_result
+            f.id,
+            f.severity,
+            f.label,
+            f.lens,
+            f.reviewer,
+            f.section,
+            f.citation_ref,
+            f.citation_status,
+            f.llm_citation_status,
+            f.claim,
+            f.evidence,
+            f.recommendation,
+            discourse_result
         ));
     }
     md.push('\n');
@@ -195,7 +253,9 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
     }
 
     md.push_str("## Discourse audit\n\n");
-    md.push_str("| Round | Move | Lens | Target | Detail | New evidence |\n|---|---|---|---|---|---|\n");
+    md.push_str(
+        "| Round | Move | Lens | Target | Detail | New evidence |\n|---|---|---|---|---|---|\n",
+    );
     for a in audit {
         for m in &a.moves {
             md.push_str(&format!(
@@ -218,7 +278,10 @@ pub fn write_describe(out_dir: &Path, d: &Describe, todos: &[String]) -> Result<
         md.push_str(&format!("- {}\n", w));
     }
     md.push_str(&format!("\n## Labels\n\n{}\n\n", d.labels.join(", ")));
-    md.push_str(&format!("## can_be_split\n\n{} — {}\n\n", d.can_be_split, d.can_be_split_note));
+    md.push_str(&format!(
+        "## can_be_split\n\n{} — {}\n\n",
+        d.can_be_split, d.can_be_split_note
+    ));
     md.push_str("## Needs-Review Markers (deterministic scan)\n\n");
     if todos.is_empty() {
         md.push_str("None\n");
@@ -239,10 +302,19 @@ pub fn write_improve(out_dir: &Path, suggestions: &[Suggestion]) -> Result<PathB
         md.push_str("No suggestions\n");
     }
     for s in suggestions {
-        md.push_str(&format!("## {} — {} [{}]\n\n", s.relevant_section, s.one_sentence_summary, s.label));
+        md.push_str(&format!(
+            "## {} — {} [{}]\n\n",
+            s.relevant_section, s.one_sentence_summary, s.label
+        ));
         md.push_str(&format!("{}\n\n", s.suggestion_content));
-        md.push_str(&format!("```markdown\n// before\n{}\n```\n\n", s.existing_text));
-        md.push_str(&format!("```markdown\n// after\n{}\n```\n\n", s.revised_text));
+        md.push_str(&format!(
+            "```markdown\n// before\n{}\n```\n\n",
+            s.existing_text
+        ));
+        md.push_str(&format!(
+            "```markdown\n// after\n{}\n```\n\n",
+            s.revised_text
+        ));
     }
     let path = out_dir.join("improve.md");
     std::fs::write(&path, md).with_context(|| format!("failed to write {}", path.display()))?;

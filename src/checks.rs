@@ -62,14 +62,26 @@ pub struct CheckResult {
 /// (uncertain, #5).
 fn approx_sentence_count(doc: &str) -> usize {
     let endings = [
-        "다.", "음.", "됨.", "함.", "임.", "라.", "니다.", "습니다.", "입니다.", "네요.", "어요.", "예요.",
+        "다.",
+        "음.",
+        "됨.",
+        "함.",
+        "임.",
+        "라.",
+        "니다.",
+        "습니다.",
+        "입니다.",
+        "네요.",
+        "어요.",
+        "예요.",
     ];
     let ending_hits: usize = endings.iter().map(|e| doc.matches(e).count()).sum();
 
     // To exclude decimal points between digits ("3.5") and abbreviation-like notation with no
     // trailing space, only count cases where "the punctuation isn't preceded by a digit and is
     // followed by a space/newline".
-    let punct_re = Regex::new(r"[^0-9][.!?](?:\s|$)").expect("failed to compile sentence punctuation regex");
+    let punct_re =
+        Regex::new(r"[^0-9][.!?](?:\s|$)").expect("failed to compile sentence punctuation regex");
     let punct_hits = punct_re.find_iter(doc).count();
 
     ending_hits.max(punct_hits)
@@ -87,7 +99,11 @@ fn citation_density_check(input: &Input) -> CheckResult {
         };
     }
     let ratio = citations as f64 / approx_sentences as f64;
-    let status = if ratio >= 0.05 { CheckStatus::Pass } else { CheckStatus::Warn };
+    let status = if ratio >= 0.05 {
+        CheckStatus::Pass
+    } else {
+        CheckStatus::Warn
+    };
     CheckResult {
         id: "citation_density".into(),
         title: "Citation density relative to claims".into(),
@@ -136,15 +152,28 @@ fn source_diversity_check(spec: &Spec, input: &Input) -> CheckResult {
     let owned = input
         .citations
         .iter()
-        .filter(|c| spec.subject_owned_domains.iter().any(|d| host_matches_owned_domain(&c.url, d)))
+        .filter(|c| {
+            spec.subject_owned_domains
+                .iter()
+                .any(|d| host_matches_owned_domain(&c.url, d))
+        })
         .count();
     let ratio = owned as f64 / input.citations.len() as f64;
-    let status = if ratio <= 0.4 { CheckStatus::Pass } else { CheckStatus::Warn };
+    let status = if ratio <= 0.4 {
+        CheckStatus::Pass
+    } else {
+        CheckStatus::Warn
+    };
     CheckResult {
         id: "source_diversity".into(),
         title: "Source diversity (share of self-published domains)".into(),
         status,
-        evidence: format!("Of {} total citations, {} are self-published domains ({:.0}%)", input.citations.len(), owned, ratio * 100.0),
+        evidence: format!(
+            "Of {} total citations, {} are self-published domains ({:.0}%)",
+            input.citations.len(),
+            owned,
+            ratio * 100.0
+        ),
     }
 }
 
@@ -159,8 +188,15 @@ fn numeric_consistency_check(input: &Input) -> CheckResult {
         .expect("failed to compile numeric regex");
     let mut seen: HashMap<String, Vec<String>> = HashMap::new();
     for cap in re.captures_iter(&input.document) {
-        let phrase = cap.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-        let value = format!("{}{}", cap.get(2).map(|m| m.as_str()).unwrap_or(""), cap.get(3).map(|m| m.as_str()).unwrap_or(""));
+        let phrase = cap
+            .get(1)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default();
+        let value = format!(
+            "{}{}",
+            cap.get(2).map(|m| m.as_str()).unwrap_or(""),
+            cap.get(3).map(|m| m.as_str()).unwrap_or("")
+        );
         if phrase.chars().count() < 2 {
             continue;
         }
@@ -187,9 +223,14 @@ fn numeric_consistency_check(input: &Input) -> CheckResult {
     } else {
         CheckResult {
             id: "numeric_consistency".into(),
-            title: "Numeric consistency (cross-check of repeated figures for the same phrase)".into(),
+            title: "Numeric consistency (cross-check of repeated figures for the same phrase)"
+                .into(),
             status: CheckStatus::Warn,
-            evidence: format!("Potential inconsistencies: {} — {}", conflicts.len(), conflicts.join(" | ")),
+            evidence: format!(
+                "Potential inconsistencies: {} — {}",
+                conflicts.len(),
+                conflicts.join(" | ")
+            ),
         }
     }
 }
@@ -199,8 +240,17 @@ fn numeric_consistency_check(input: &Input) -> CheckResult {
 /// problem (not every research task runs into access restrictions), but its presence is itself a
 /// positive signal.
 fn access_limitation_disclosure_check(input: &Input) -> CheckResult {
-    let markers = ["확인 안 됨", "접근 불가", "단정할 근거 없음", "확인 안됨", "미확인"];
-    let hits: usize = markers.iter().map(|m| input.document.matches(m).count()).sum();
+    let markers = [
+        "확인 안 됨",
+        "접근 불가",
+        "단정할 근거 없음",
+        "확인 안됨",
+        "미확인",
+    ];
+    let hits: usize = markers
+        .iter()
+        .map(|m| input.document.matches(m).count())
+        .sum();
     CheckResult {
         id: "access_limitation_disclosure".into(),
         title: "Honest disclosure of access limitations".into(),
@@ -214,8 +264,19 @@ fn access_limitation_disclosure_check(input: &Input) -> CheckResult {
 /// PASS/FAIL — whether the disclosure is actually adequate is judged by discourse
 /// (citation_status).
 fn incentive_disclosure_scan(input: &Input) -> CheckResult {
-    let markers = ["리뷰 이벤트", "협찬", "제휴 리뷰", "보상 프로그램", "인센티브", "현금 보상"];
-    let hits: Vec<&str> = markers.iter().filter(|m| input.document.contains(*m)).copied().collect();
+    let markers = [
+        "리뷰 이벤트",
+        "협찬",
+        "제휴 리뷰",
+        "보상 프로그램",
+        "인센티브",
+        "현금 보상",
+    ];
+    let hits: Vec<&str> = markers
+        .iter()
+        .filter(|m| input.document.contains(*m))
+        .copied()
+        .collect();
     if hits.is_empty() {
         CheckResult {
             id: "incentive_disclosure".into(),
@@ -250,14 +311,19 @@ fn staleness_flag(spec: &Spec, input: &Input, as_of_year: u32) -> CheckResult {
     let old_years: std::collections::HashSet<u32> = re
         .find_iter(&input.document)
         .filter_map(|m| m.as_str().parse::<u32>().ok())
-        .filter(|y| as_of_year.saturating_sub(*y) > spec.staleness_threshold_years && *y <= as_of_year)
+        .filter(|y| {
+            as_of_year.saturating_sub(*y) > spec.staleness_threshold_years && *y <= as_of_year
+        })
         .collect();
     if old_years.is_empty() {
         CheckResult {
             id: "staleness".into(),
             title: "Citation freshness".into(),
             status: CheckStatus::Pass,
-            evidence: format!("No years exceed the threshold ({} years)", spec.staleness_threshold_years),
+            evidence: format!(
+                "No years exceed the threshold ({} years)",
+                spec.staleness_threshold_years
+            ),
         }
     } else {
         let mut ys: Vec<u32> = old_years.into_iter().collect();
@@ -333,7 +399,12 @@ fn resolve_and_validate(host: &str, port: u16) -> Result<()> {
     let mut any = false;
     for addr in addrs {
         any = true;
-        anyhow::ensure!(!ip_is_blocked(addr.ip()), "Resolved to a blocked IP range: {} -> {}", host, addr.ip());
+        anyhow::ensure!(
+            !ip_is_blocked(addr.ip()),
+            "Resolved to a blocked IP range: {} -> {}",
+            host,
+            addr.ip()
+        );
     }
     anyhow::ensure!(any, "No DNS resolution results: {host}");
     Ok(())
@@ -344,9 +415,17 @@ fn resolve_and_validate(host: &str, port: u16) -> Result<()> {
 /// (redirecting into an internal network).
 fn validate_url_safe(raw_url: &str) -> Result<url::Url> {
     let u = url::Url::parse(raw_url).with_context(|| format!("URL parsing failed: {raw_url}"))?;
-    anyhow::ensure!(matches!(u.scheme(), "http" | "https"), "Disallowed scheme: {}", u.scheme());
-    let host = u.host_str().ok_or_else(|| anyhow!("URL has no host: {raw_url}"))?;
-    let port = u.port_or_known_default().unwrap_or(if u.scheme() == "https" { 443 } else { 80 });
+    anyhow::ensure!(
+        matches!(u.scheme(), "http" | "https"),
+        "Disallowed scheme: {}",
+        u.scheme()
+    );
+    let host = u
+        .host_str()
+        .ok_or_else(|| anyhow!("URL has no host: {raw_url}"))?;
+    let port = u
+        .port_or_known_default()
+        .unwrap_or(if u.scheme() == "https" { 443 } else { 80 });
     resolve_and_validate(host, port)?;
     Ok(u)
 }
@@ -360,7 +439,9 @@ struct FetchOutcome {
 fn read_bounded(resp: ureq::Response, max_bytes: usize) -> Result<Vec<u8>> {
     let mut reader = resp.into_reader().take(max_bytes as u64 + 1);
     let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).context("failed to read response body")?;
+    reader
+        .read_to_end(&mut buf)
+        .context("failed to read response body")?;
     buf.truncate(max_bytes);
     Ok(buf)
 }
@@ -370,9 +451,16 @@ fn read_bounded(resp: ureq::Response, max_bytes: usize) -> Result<Vec<u8>> {
 /// GET responses are capped at 1MB.
 fn safe_fetch(raw_url: &str, method_get: bool) -> Result<FetchOutcome> {
     let mut current = validate_url_safe(raw_url)?;
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(8)).redirects(0).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(8))
+        .redirects(0)
+        .build();
     for hop in 0..=MAX_REDIRECTS {
-        let req = if method_get { agent.get(current.as_str()) } else { agent.head(current.as_str()) };
+        let req = if method_get {
+            agent.get(current.as_str())
+        } else {
+            agent.head(current.as_str())
+        };
         let resp = match req.call() {
             Ok(r) => r,
             Err(ureq::Error::Status(_, r)) => r,
@@ -380,18 +468,32 @@ fn safe_fetch(raw_url: &str, method_get: bool) -> Result<FetchOutcome> {
         };
         let status = resp.status();
         if (300..400).contains(&status) {
-            anyhow::ensure!(hop < MAX_REDIRECTS, "Redirect limit ({}) exceeded", MAX_REDIRECTS);
+            anyhow::ensure!(
+                hop < MAX_REDIRECTS,
+                "Redirect limit ({}) exceeded",
+                MAX_REDIRECTS
+            );
             let location = resp
                 .header("Location")
                 .ok_or_else(|| anyhow!("Redirect response ({status}) has no Location header"))?
                 .to_string();
-            let next = current.join(&location).with_context(|| format!("Failed to resolve redirect URL: {location}"))?;
+            let next = current
+                .join(&location)
+                .with_context(|| format!("Failed to resolve redirect URL: {location}"))?;
             current = validate_url_safe(next.as_str())?; // re-validate on every hop — prevents SSRF bypass
             continue;
         }
         let content_type = resp.header("Content-Type").map(|s| s.to_string());
-        let body = if method_get { Some(read_bounded(resp, MAX_BODY_BYTES)?) } else { None };
-        return Ok(FetchOutcome { status, content_type, body });
+        let body = if method_get {
+            Some(read_bounded(resp, MAX_BODY_BYTES)?)
+        } else {
+            None
+        };
+        return Ok(FetchOutcome {
+            status,
+            content_type,
+            body,
+        });
     }
     Err(anyhow!("Failed to process redirect"))
 }
@@ -433,8 +535,12 @@ fn check_one(url: &str) -> LinkStatus {
         },
         Probe::Err(head_err) => match probe(url, true) {
             Probe::Status(s2) if s2 < 400 => LinkStatus::Ok,
-            Probe::Status(s2) => LinkStatus::Unreachable(format!("HEAD error ({head_err}), GET={s2}")),
-            Probe::Err(get_err) => LinkStatus::Unreachable(format!("Both HEAD and GET errored: {head_err} / {get_err}")),
+            Probe::Status(s2) => {
+                LinkStatus::Unreachable(format!("HEAD error ({head_err}), GET={s2}"))
+            }
+            Probe::Err(get_err) => LinkStatus::Unreachable(format!(
+                "Both HEAD and GET errored: {head_err} / {get_err}"
+            )),
         },
     }
 }
@@ -487,7 +593,11 @@ fn dead_link_check(input: &Input, skip: bool) -> CheckResult {
             id: "dead_link".into(),
             title: "Citation URL response check".into(),
             status: CheckStatus::Warn,
-            evidence: format!("{} response(s) could not be verified (timeout/blocked/etc.): {}", unknown.len(), unknown.join(", ")),
+            evidence: format!(
+                "{} response(s) could not be verified (timeout/blocked/etc.): {}",
+                unknown.len(),
+                unknown.join(", ")
+            ),
         }
     }
 }
@@ -529,10 +639,18 @@ fn is_text_content_type(ct: &str) -> bool {
 /// morphological/punctuation differences (full text normalization is out of scope), but reduces
 /// false negatives from line-break/spacing differences.
 fn normalize_for_match(s: &str) -> String {
-    s.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect()
+    s.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
-fn verify_citation(input: &Input, citation_ref: &str, quote: &str, skip: bool) -> CitationVerification {
+fn verify_citation(
+    input: &Input,
+    citation_ref: &str,
+    quote: &str,
+    skip: bool,
+) -> CitationVerification {
     if skip {
         return CitationVerification::Unfetched;
     }
@@ -549,7 +667,11 @@ fn verify_citation(input: &Input, citation_ref: &str, quote: &str, skip: bool) -
     }
     match safe_fetch(&citation.url, true) {
         Ok(outcome) if outcome.status < 400 => {
-            let is_text = outcome.content_type.as_deref().map(is_text_content_type).unwrap_or(true);
+            let is_text = outcome
+                .content_type
+                .as_deref()
+                .map(is_text_content_type)
+                .unwrap_or(true);
             if !is_text {
                 return CitationVerification::FetchFailed;
             }
@@ -595,7 +717,9 @@ pub fn run_all(spec: &Spec, input: &Input, opts: &CheckOptions) -> Vec<CheckResu
         staleness_flag(spec, input, opts.as_of_year),
         dead_link_check(input, opts.skip_link_check),
     ];
-    all.into_iter().filter(|r| spec.check_enabled(&r.id)).collect()
+    all.into_iter()
+        .filter(|r| spec.check_enabled(&r.id))
+        .collect()
 }
 
 /// Serializes to JSON so report.rs can render a table by cross-referencing spec.deterministic_checks.
@@ -613,7 +737,9 @@ pub fn to_json(results: &[CheckResult]) -> serde_json::Value {
 /// status label. If there's no title (e.g. a file hand-written by an external tool), falls back
 /// to using the id as the title.
 pub fn from_json(v: &serde_json::Value) -> Result<Vec<CheckResult>> {
-    let obj = v.as_object().ok_or_else(|| anyhow!("deterministic_results must be a JSON object"))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| anyhow!("deterministic_results must be a JSON object"))?;
     anyhow::ensure!(!obj.is_empty(), "deterministic_results is empty");
     let mut out = Vec::new();
     for (id, entry) in obj {
@@ -621,14 +747,24 @@ pub fn from_json(v: &serde_json::Value) -> Result<Vec<CheckResult>> {
             .get("status")
             .and_then(|s| s.as_str())
             .ok_or_else(|| anyhow!("check \"{id}\" has no status field (or it isn't a string)"))?;
-        let status = CheckStatus::from_label(status_str).with_context(|| format!("check \"{id}\""))?;
-        let evidence = entry.get("evidence").and_then(|e| e.as_str()).unwrap_or("").to_string();
+        let status =
+            CheckStatus::from_label(status_str).with_context(|| format!("check \"{id}\""))?;
+        let evidence = entry
+            .get("evidence")
+            .and_then(|e| e.as_str())
+            .unwrap_or("")
+            .to_string();
         let title = entry
             .get("title")
             .and_then(|t| t.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| id.clone());
-        out.push(CheckResult { id: id.clone(), title, status, evidence });
+        out.push(CheckResult {
+            id: id.clone(),
+            title,
+            status,
+            evidence,
+        });
     }
     Ok(out)
 }
@@ -702,10 +838,22 @@ mod tests {
 
     #[test]
     fn host_matches_owned_domain_rejects_substring_lookalike() {
-        assert!(host_matches_owned_domain("https://tossplace.com/x", "tossplace.com"));
-        assert!(host_matches_owned_domain("https://www.tossplace.com/x", "tossplace.com"));
-        assert!(!host_matches_owned_domain("https://evil-tossplace.com.attacker.net/x", "tossplace.com"));
-        assert!(!host_matches_owned_domain("https://nottossplace.com/x", "tossplace.com"));
+        assert!(host_matches_owned_domain(
+            "https://tossplace.com/x",
+            "tossplace.com"
+        ));
+        assert!(host_matches_owned_domain(
+            "https://www.tossplace.com/x",
+            "tossplace.com"
+        ));
+        assert!(!host_matches_owned_domain(
+            "https://evil-tossplace.com.attacker.net/x",
+            "tossplace.com"
+        ));
+        assert!(!host_matches_owned_domain(
+            "https://nottossplace.com/x",
+            "tossplace.com"
+        ));
     }
 
     #[test]

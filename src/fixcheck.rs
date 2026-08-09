@@ -30,13 +30,23 @@ struct FixCheckOutput {
 }
 
 /// If prior_confirmed is empty, returns an empty result (either round 1, or no findings were confirmed previously).
-pub fn run(llm: &Llm, spec: &Spec, input: &Input, prior_confirmed: &[Finding]) -> Result<Vec<FixStatus>> {
+pub fn run(
+    llm: &Llm,
+    spec: &Spec,
+    input: &Input,
+    prior_confirmed: &[Finding],
+) -> Result<Vec<FixStatus>> {
     if prior_confirmed.is_empty() {
         return Ok(Vec::new());
     }
     let list = prior_confirmed
         .iter()
-        .map(|f| format!("- id={} | {} | {}\n  Evidence: {}", f.id, f.section, f.claim, f.evidence))
+        .map(|f| {
+            format!(
+                "- id={} | {} | {}\n  Evidence: {}",
+                f.id, f.section, f.claim, f.evidence
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let ctx = shared_context(spec, input);
@@ -47,7 +57,10 @@ pub fn run(llm: &Llm, spec: &Spec, input: &Input, prior_confirmed: &[Finding]) -
          {{\"results\":[{{\"finding_id\":\"...\",\"status\":\"FIXED|STILL_OPEN|UNKNOWN|REVERSED\",\"evidence\":\"...\"}}]}}\n",
         list = list
     );
-    let v = llm.json_ctx(Some(&ctx), &task, Some(FIXCHECK_SYSTEM)).context("fix check failed")?;
-    let out: FixCheckOutput = serde_json::from_value(v).context("fix check JSON schema mismatch")?;
+    let v = llm
+        .json_ctx(Some(&ctx), &task, Some(FIXCHECK_SYSTEM))
+        .context("fix check failed")?;
+    let out: FixCheckOutput =
+        serde_json::from_value(v).context("fix check JSON schema mismatch")?;
     Ok(out.results)
 }

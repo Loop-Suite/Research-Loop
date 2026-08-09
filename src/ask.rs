@@ -10,5 +10,6 @@ You answer only based on the document, brief, and tone guide. If there is no bas
 pub fn run(llm: &Llm, spec: &Spec, input: &Input, question: &str) -> Result<String> {
     let ctx = shared_context(spec, input);
     let task = format!("# Question\n{question}\n");
-    llm.text_ctx(Some(&ctx), &task, Some(ASK_SYSTEM)).context("ask failed")
+    llm.text_ctx(Some(&ctx), &task, Some(ASK_SYSTEM))
+        .context("ask failed")
 }

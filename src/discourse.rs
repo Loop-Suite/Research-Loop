@@ -232,10 +232,16 @@ fn findings_catalog(findings: &[Finding], resolved: &HashMap<String, Resolution>
 /// Collects, in order of first appearance and without duplicates, the list of lenses that own
 /// this round's review targets (unresolved or UNCERTAIN from a previous round) (#1) — the
 /// participant roster used to create a separate critic call per lens.
-fn participating_lenses(findings: &[Finding], resolved: &HashMap<String, Resolution>) -> Vec<String> {
+fn participating_lenses(
+    findings: &[Finding],
+    resolved: &HashMap<String, Resolution>,
+) -> Vec<String> {
     let mut lenses: Vec<String> = Vec::new();
     for f in findings {
-        let reviewable = resolved.get(&f.id).map(|r| r.status == "UNCERTAIN").unwrap_or(true);
+        let reviewable = resolved
+            .get(&f.id)
+            .map(|r| r.status == "UNCERTAIN")
+            .unwrap_or(true);
         if reviewable && !f.lens.is_empty() && !lenses.contains(&f.lens) {
             lenses.push(f.lens.clone());
         }
@@ -306,7 +312,12 @@ fn moves_catalog(moves: &[Move]) -> String {
 /// Stage-2 (adjudication) prompt — takes as input only the moves already finalized in stage 1.
 /// This call has no authority to create new moves; it only determines
 /// CONFIRMED/REJECTED/MERGED/UNCERTAIN based on the given moves (#1).
-fn build_resolutions_prompt(findings: &[Finding], resolved: &HashMap<String, Resolution>, round: usize, moves: &[Move]) -> String {
+fn build_resolutions_prompt(
+    findings: &[Finding],
+    resolved: &HashMap<String, Resolution>,
+    round: usize,
+    moves: &[Move],
+) -> String {
     format!(
         "# Task\nPerform stage 2 (adjudication) of round {round} discourse. Below are the moves other analysts \
          have already raised this round — you do not create new moves; you make the final verdict for each \
@@ -350,9 +361,12 @@ pub fn run(
     let mut audit: Vec<DiscourseAudit> = Vec::new();
 
     for round in 1..=max_rounds {
-        let unresolved = findings
-            .iter()
-            .any(|f| resolved.get(&f.id).map(|r| r.status == "UNCERTAIN").unwrap_or(true));
+        let unresolved = findings.iter().any(|f| {
+            resolved
+                .get(&f.id)
+                .map(|r| r.status == "UNCERTAIN")
+                .unwrap_or(true)
+        });
         if !unresolved {
             break;
         }
@@ -374,7 +388,10 @@ pub fn run(
             resolved.insert(r.finding_id.clone(), r);
         }
 
-        audit.push(DiscourseAudit { round, moves: dr.moves });
+        audit.push(DiscourseAudit {
+            round,
+            moves: dr.moves,
+        });
 
         if round == max_rounds {
             break;
@@ -382,7 +399,8 @@ pub fn run(
     }
 
     let model = llm.model.as_deref().unwrap_or("unknown");
-    let finding_by_id: HashMap<String, &Finding> = findings.iter().map(|f| (f.id.clone(), f)).collect();
+    let finding_by_id: HashMap<String, &Finding> =
+        findings.iter().map(|f| (f.id.clone(), f)).collect();
 
     // Remaining UNCERTAIN/unjudged findings after rounds are exhausted: make the final verdict via confidence-weighted vote.
     for f in findings.iter() {
@@ -414,12 +432,21 @@ pub fn run(
         } else if net <= -VOTE_THRESHOLD {
             ("REJECTED".to_string(), format!("discourse rounds exhausted, rejected via confidence-weighted vote (net={net:.2})"))
         } else {
-            ("UNCERTAIN".to_string(), format!("discourse rounds exhausted, no verdict reached (net={net:.2})"))
+            (
+                "UNCERTAIN".to_string(),
+                format!("discourse rounds exhausted, no verdict reached (net={net:.2})"),
+            )
         };
 
         resolved.insert(
             f.id.clone(),
-            Resolution { finding_id: f.id.clone(), status, merged_into: String::new(), reason, needs_human_review: false },
+            Resolution {
+                finding_id: f.id.clone(),
+                status,
+                merged_into: String::new(),
+                reason,
+                needs_human_review: false,
+            },
         );
     }
 
@@ -452,13 +479,20 @@ fn run_lens_critic_call(
     round: usize,
     acting_lens: &str,
 ) -> Result<MovesRound> {
-    let others: Vec<Finding> = findings.iter().filter(|f| f.lens != acting_lens).cloned().collect();
+    let others: Vec<Finding> = findings
+        .iter()
+        .filter(|f| f.lens != acting_lens)
+        .cloned()
+        .collect();
     let prompt = build_moves_prompt_for_lens(spec, &others, resolved, round, acting_lens);
     let mv = llm
         .json(&prompt, Some(DISCOURSE_MOVES_SYSTEM))
-        .with_context(|| format!("discourse round {round} lens '{acting_lens}' critic call failed"))?;
-    let mut mr: MovesRound = serde_json::from_value(mv)
-        .with_context(|| format!("discourse round {round} lens '{acting_lens}' moves JSON schema mismatch"))?;
+        .with_context(|| {
+            format!("discourse round {round} lens '{acting_lens}' critic call failed")
+        })?;
+    let mut mr: MovesRound = serde_json::from_value(mv).with_context(|| {
+        format!("discourse round {round} lens '{acting_lens}' moves JSON schema mismatch")
+    })?;
     for m in mr.moves.iter_mut() {
         m.lens = acting_lens.to_string();
     }
@@ -506,10 +540,14 @@ fn run_round_call(
     let rv = llm
         .json(&res_prompt, Some(DISCOURSE_ADJUDICATE_SYSTEM))
         .with_context(|| format!("discourse round {round} resolutions stage failed"))?;
-    let rr: ResolutionsRound =
-        serde_json::from_value(rv).with_context(|| format!("discourse round {round} resolutions JSON schema mismatch"))?;
+    let rr: ResolutionsRound = serde_json::from_value(rv)
+        .with_context(|| format!("discourse round {round} resolutions JSON schema mismatch"))?;
 
-    Ok(DiscourseRound { moves: all_moves, resolutions: rr.resolutions, surfaced: all_surfaced })
+    Ok(DiscourseRound {
+        moves: all_moves,
+        resolutions: rr.resolutions,
+        surfaced: all_surfaced,
+    })
 }
 
 #[cfg(test)]
@@ -571,11 +609,21 @@ mod tests {
 
     #[test]
     fn participating_lenses_dedupes_and_skips_resolved() {
-        let findings = vec![finding("f1", "lens_a"), finding("f2", "lens_b"), finding("f3", "lens_a")];
+        let findings = vec![
+            finding("f1", "lens_a"),
+            finding("f2", "lens_b"),
+            finding("f3", "lens_a"),
+        ];
         let mut resolved = HashMap::new();
         resolved.insert(
             "f3".to_string(),
-            Resolution { finding_id: "f3".to_string(), status: "CONFIRMED".to_string(), merged_into: String::new(), reason: String::new(), needs_human_review: false },
+            Resolution {
+                finding_id: "f3".to_string(),
+                status: "CONFIRMED".to_string(),
+                merged_into: String::new(),
+                reason: String::new(),
+                needs_human_review: false,
+            },
         );
         let lenses = participating_lenses(&findings, &resolved);
         assert_eq!(lenses, vec!["lens_a".to_string(), "lens_b".to_string()]);
@@ -587,7 +635,13 @@ mod tests {
         let mut resolved = HashMap::new();
         resolved.insert(
             "f1".to_string(),
-            Resolution { finding_id: "f1".to_string(), status: "CONFIRMED".to_string(), merged_into: String::new(), reason: String::new(), needs_human_review: false },
+            Resolution {
+                finding_id: "f1".to_string(),
+                status: "CONFIRMED".to_string(),
+                merged_into: String::new(),
+                reason: String::new(),
+                needs_human_review: false,
+            },
         );
         assert!(participating_lenses(&findings, &resolved).is_empty());
     }
@@ -601,17 +655,40 @@ mod tests {
         let resolved = HashMap::new();
         let spec = test_spec();
 
-        let others_for_a: Vec<Finding> = findings.iter().filter(|f| f.lens != "lens_a").cloned().collect();
+        let others_for_a: Vec<Finding> = findings
+            .iter()
+            .filter(|f| f.lens != "lens_a")
+            .cloned()
+            .collect();
         let prompt_a = build_moves_prompt_for_lens(&spec, &others_for_a, &resolved, 1, "lens_a");
-        assert!(prompt_a.contains("f-b1"), "lens A prompt should contain lens B's finding");
+        assert!(
+            prompt_a.contains("f-b1"),
+            "lens A prompt should contain lens B's finding"
+        );
         assert!(prompt_a.contains("claim-f-b1"));
-        assert!(!prompt_a.contains("f-a1"), "lens A prompt should not contain its own (lens_a) finding id");
-        assert!(!prompt_a.contains("claim-f-a1"), "lens A prompt should not contain its own claim");
+        assert!(
+            !prompt_a.contains("f-a1"),
+            "lens A prompt should not contain its own (lens_a) finding id"
+        );
+        assert!(
+            !prompt_a.contains("claim-f-a1"),
+            "lens A prompt should not contain its own claim"
+        );
 
-        let others_for_b: Vec<Finding> = findings.iter().filter(|f| f.lens != "lens_b").cloned().collect();
+        let others_for_b: Vec<Finding> = findings
+            .iter()
+            .filter(|f| f.lens != "lens_b")
+            .cloned()
+            .collect();
         let prompt_b = build_moves_prompt_for_lens(&spec, &others_for_b, &resolved, 1, "lens_b");
-        assert!(prompt_b.contains("f-a1"), "lens B prompt should contain lens A's finding");
-        assert!(!prompt_b.contains("f-b1"), "lens B prompt should not contain its own (lens_b) finding id");
+        assert!(
+            prompt_b.contains("f-a1"),
+            "lens B prompt should contain lens A's finding"
+        );
+        assert!(
+            !prompt_b.contains("f-b1"),
+            "lens B prompt should not contain its own (lens_b) finding id"
+        );
     }
 
     #[test]
@@ -619,9 +696,15 @@ mod tests {
         // If there is only 1 lens (no comparison target), run_round_call never creates a critic call at all.
         let findings = vec![finding("f1", "lens_a"), finding("f2", "lens_a")];
         let resolved = HashMap::new();
-        assert_eq!(participating_lenses(&findings, &resolved), vec!["lens_a".to_string()]);
+        assert_eq!(
+            participating_lenses(&findings, &resolved),
+            vec!["lens_a".to_string()]
+        );
         // Reproduces the lenses.len() < 2 branch exactly: must proceed with moves empty, without any critic call.
         let lenses = participating_lenses(&findings, &resolved);
-        assert!(lenses.len() < 2, "a single lens has no comparison target, so the critic stage should be skipped");
+        assert!(
+            lenses.len() < 2,
+            "a single lens has no comparison target, so the critic stage should be skipped"
+        );
     }
 }
