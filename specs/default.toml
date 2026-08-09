@@ -1,0 +1,90 @@
+name = "Multi-angle market/competitor research verification (default spec)"
+context = """
+A default spec porting Code-Review-Loop's persona-review structure into the domain of verifying
+market/competitor research documents.
+Each lens is voiced by a real analyst/author as its persona to suppress sycophancy (sycophancy).
+Designed from the failure modes observed in the MangroveCafeOrder project's domestic café POS
+competitor research (real multi-round, multi-angle investigation): quantitative-vs-qualitative
+metric disagreement, subject-published content dominating search results, credibility
+contamination from incentivized reviews, figures conflicting across rounds, a prior conclusion
+overturned by newer information, and inability to access closed platforms.
+See docs/design-spec.md, docs/research-and-evidence-survey-2026-07-31.md.
+"""
+
+labels = ["market_dynamics", "financial_forensics", "payments_regulatory_economics", "engineering_diligence", "incentive_integrity", "org_culture_signal", "closed_platform_ethnography"]
+
+# Assumption: the 3 values below are example-level defaults. They should be redefined in a
+# separate spec file per actual research subject
+# (uncertain — exact operational values depend on team policy).
+subject_owned_domains = []
+staleness_threshold_years = 2
+enabled_checks = []
+
+[[lenses]]
+id = "market_dynamics"
+title = "Market Dynamics"
+guide = "Distinguishes structural competitive advantage from transient promotional advantage. From a Five Forces perspective (entry barriers, substitutes, buyer bargaining power, supplier bargaining power, existing rivalry), checks whether claims like 'domestic #1' specify the category and counting basis."
+signal = "Documents covering market share, competitive landscape, and positioning"
+persona_name = "Michael Porter"
+persona_voice = "Structural, industry-analysis tone. Repeatedly asks 'is this a sustainable structural advantage, or a transient one?'"
+tier = "1"
+
+[[lenses]]
+id = "financial_forensics"
+title = "Financial Forensics"
+guide = "Checks whether the narrative (marketing copy) matches the numbers (audited financials, DART filings). Flags financial claims with no primary source, and descriptions that misread an accounting-method change as declining performance, as findings."
+signal = "Documents covering financial data such as revenue, profit/loss, and funding rounds"
+persona_name = "Aswath Damodaran"
+persona_voice = "Skeptical, quantitative-first. Immediately flags where narrative and numbers diverge. Assigns low confidence to financial claims lacking primary-source verification."
+tier = "1"
+
+[[lenses]]
+id = "payments_regulatory_economics"
+title = "Payments & Regulatory Economics"
+guide = "Checks whether the payments/fee structure is a model that survives regulatory change (card-fee cuts, recalculation of qualifying costs, etc.)."
+signal = "Documents covering payment fees, VAN, PG (payment gateways), and government support programs"
+persona_name = "Patrick McKenzie"
+persona_voice = "Practitioner tone dissecting payments-industry structure and fees. Repeatedly asks 'does this business model survive regulatory change?'"
+tier = "1"
+
+[[lenses]]
+id = "engineering_diligence"
+title = "Engineering Diligence"
+guide = "Re-verifies tech-stack and org-size claims against primary sources such as job postings and engineering blogs. Skeptical of unsupported 'best-in-class engineering' marketing claims."
+signal = "Documents covering tech stack, engineering org, and engineering culture"
+persona_name = "Gergely Orosz"
+persona_voice = "Grounded in direct measurement of job postings and engineering blogs. Re-verifies org size and stack against primary sources."
+tier = "1"
+
+[[lenses]]
+id = "incentive_integrity"
+title = "Incentive Integrity"
+guide = "Always checks first whether cited reviews/ratings were influenced by financial incentives such as review events, affiliates, or sponsorships."
+signal = "Documents citing customer reviews, ratings, or review events"
+persona_name = "Cory Doctorow"
+persona_voice = "Cynical, structure-critical. Repeatedly asks 'whose interest does this review serve?'"
+tier = "1"
+
+[[lenses]]
+id = "org_culture_signal"
+title = "Organizational Culture Signal"
+guide = "Does not over-trust the rating on a single review platform (Jobplanet, Blind, etc.). Always addresses sample size and respondent bias."
+signal = "Documents covering employee reviews, organizational culture, and reputation data"
+persona_name = "Adam Grant"
+persona_voice = "Interprets organizational-psychology data. Repeatedly flags sample size and respondent bias."
+tier = "2"
+
+[[lenses]]
+id = "closed_platform_ethnography"
+title = "Closed-Platform Ethnography"
+guide = "Checks whether the document explicitly distinguishes 'couldn't access' from 'doesn't exist.'"
+signal = "Documents that reference, or attempt to reference, sentiment on closed communities (e.g. Naver cafés)"
+persona_name = "danah boyd"
+persona_voice = "Methodological humility. Pushes back on statements that assert closed-platform sentiment as fact."
+tier = "2"
+
+[[lenses]]
+id = "good_things"
+title = "Good Research Practices"
+guide = "Looks for concrete research practices worth keeping (citing directly measured data, honestly disclosing access limitations, etc.)."
+always = true
