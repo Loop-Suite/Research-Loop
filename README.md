@@ -1,10 +1,11 @@
 # research-loop
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Release: v0.1.0](https://img.shields.io/badge/release-v0.1.0-green.svg)](https://github.com/Loop-Suite/Research-Loop/releases/tag/v0.1.0)
 
 A Rust CLI that validates market/competitor research documents through **independent multi-persona review → per-lens independent discourse cross-examination → deterministic verdict**, instead of trusting a single LLM's pass over the text.
 
-This is a working, buildable binary (`cargo build --release` produces `target/release/research`), not just a design document — it has been run end-to-end against a real research document (see [Validated on a real document](#validated-on-a-real-document) below). It is also still under active hardening: of the issues opened against its own design, 11 are closed and 1 remains open (tracked below in [Known limitations](#known-limitations)).
+This is a working, buildable binary (`cargo build --release` produces `target/release/research`, 53 tests passing), not just a design document — it has been run end-to-end against a real research document (see [Validated on a real document](#validated-on-a-real-document) below). It is also still under active hardening: of the 13 issues opened against its own design, all 13 are closed — 12 as of the tagged [`v0.1.0`](https://github.com/Loop-Suite/Research-Loop/releases/tag/v0.1.0) release, plus one more (#23) closed afterward on `main` but not yet part of a tagged release (see [Known limitations](#known-limitations) and [Real-world validation](#real-world-validation)).
 
 The default LLM backend is a `claude -p` subprocess (Claude Code CLI) — no separate API key required. An OpenRouter backend is also available (`--backend openrouter`, requires `OPENROUTER_API_KEY`, defaults to `openai/gpt-oss-120b` if `--model` is unset).
 
@@ -301,11 +302,13 @@ The evidence survey didn't stop at README pages. Reading actual source files in 
 
 ## Real-world validation
 
-`research`'s own `--prior`-chained review pipeline was also run against itself: real
-`claude -p --model haiku` execution (2 rounds, round 2 via `--prior` on round 1's output),
-preceded by a static code review of that same `--prior` code path. Full methodology, every raw
-number, and caveats (one document, one model, no benchmark matrix):
+`research`'s own `--prior`-chained review pipeline has been run against itself twice, in two
+separate real-money sessions: an initial 2-round `--prior` chain, and a later, deeper 3-round
+chain run as part of a production-hardening pass. Full methodology, every raw number, and
+caveats for both (one document per session, one model, no benchmark matrix):
 [evals/README.md](evals/README.md).
+
+**Session 1 — 2-round chain:**
 
 - **9 real bugs found** — 6 from zero-cost static review alone (including a real
   prompt-injection fence-escaping bypass and a reproduced `std::process` pipe deadlock), 3 more
@@ -316,14 +319,41 @@ number, and caveats (one document, one model, no benchmark matrix):
   needed semantic (LLM-judged) dedup, not a deterministic key — a `lens`+`section`+`label` key
   was tried against the real reproduction and confirmed insufficient. Logged as open in the eval
   write-up; fixed separately afterward (`src/dedup.rs`).
-- **Total real spend: ≈ $0.93–$1.03** across the session (two successful rounds at $0.4136 +
-  $0.3707, exact from `state.json`, plus one pre-fix crashed attempt estimated at $0.15–$0.25).
+- Session 1 real spend: ≈ $0.93–$1.03 (two successful rounds at $0.4136 + $0.3707, exact from
+  `state.json`, plus one pre-fix crashed attempt estimated at $0.15–$0.25).
+
+**Session 2 — production hardening pass, 3-round chain (4 lenses):**
+
+- **2 more real bugs found by a fresh adversarial re-audit**, zero LLM cost — **#18** (neither
+  LLM backend had a timeout; a hung `claude` subprocess or stalled OpenRouter connection
+  blocked the run forever) and **#19** (no size cap reading `--document`/`--brief`/`--style`/
+  `--deterministic-results`, risking unbounded memory use).
+- **1 more real bug found by going a round deeper than Session 1** (3 rounds instead of 2):
+  **#23** — round 3 crashed (haiku returned 3 different malformed-JSON shapes in a row to the
+  discourse critic call) only *after* 4 real, already-costed lens-review calls had completed;
+  that spend appeared nowhere in the output. Fixed by printing the accumulated usage/cost
+  summary on any exit, not only success.
+- Round 1 ($1.0567, 15 calls) and round 2 ($1.3207, 20 calls) succeeded — exact costs from
+  `state.json`; round 3's crash cost is unmeasured, estimated ≈$0.3–$0.6 (round 3 was
+  deliberately not re-run — see `evals/README.md`).
+- Session 2 real spend: $2.3774 exact (rounds 1-2) + ≈$0.3–$0.6 estimated (round 3's crash).
+
+**Total real spend across both sessions to date: ≈ $3.6–$4.0.**
+
+Test suite: **53 tests passing** on `main` (52 as of the tagged
+[`v0.1.0`](https://github.com/Loop-Suite/Research-Loop/releases/tag/v0.1.0) release; +1
+subprocess-level integration test added afterward for the #23 fix, not yet in a tagged
+release).
 
 ## Known limitations
 
-Tracked as GitHub issues against this repo; 11 are closed, 1 remains open.
+Tracked as GitHub issues against this repo: 13 filed, all 13 closed (12 as of the tagged
+[`v0.1.0`](https://github.com/Loop-Suite/Research-Loop/releases/tag/v0.1.0) release; #23
+closed afterward, its fix on `main` but not yet in a tagged release — see
+[Real-world validation](#real-world-validation) above). One further limitation below
+(confidence calibration) is a known design gap, not filed as its own GitHub issue.
 
-- **Open — confidence calibration (#3):** `confidence` (high/medium/low) is an uncalibrated self-report, not a measured accuracy rate. `discourse.rs` no longer converts it into a differentiated vote weight (it used to: high=1.0, medium=0.6, low=0.3) — those numbers were never validated against ground truth, so every `AGREE`/`CHALLENGE` now counts as weight 1.0 (plain majority vote) until a labeled benchmark exists to calibrate against.
+- **Design gap, not GitHub-tracked — confidence calibration:** `confidence` (high/medium/low) is an uncalibrated self-report, not a measured accuracy rate. `discourse.rs` no longer converts it into a differentiated vote weight (it used to: high=1.0, medium=0.6, low=0.3) — those numbers were never validated against ground truth, so every `AGREE`/`CHALLENGE` now counts as weight 1.0 (plain majority vote) until a labeled benchmark exists to calibrate against.
 - **Citation verification is a substring match, not entailment:** `checks::verify_citations` re-fetches each cited page and checks whether the finding's `evidence` text appears in it (closed #4) — but `QUOTE_MATCHED` means the exact wording was found on the page, not that the page's *meaning* supports the claim. Fully tool-augmented verification (re-fetch, extract the actual number, diff it against the document's claim) is not implemented.
 - **`numeric_consistency_check` is a word-window regex,** not morphological/entity parsing — expect false positives/negatives. It stays `WARN`-only for exactly this reason.
 - **`citation_density_check` is still a heuristic** (Korean sentence-ending particles vs. general punctuation, whichever counts more) after its false-positive fix (#5) — `source_diversity_check`, by contrast, now does exact host/subdomain matching via the `url` crate rather than substring matching.
