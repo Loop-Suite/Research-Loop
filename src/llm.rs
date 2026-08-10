@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -376,23 +376,40 @@ fn call_claude(
         .ok_or_else(|| anyhow!("failed to open stderr"))?;
     let ctx_owned = ctx.map(|c| c.to_string());
     let task_owned = task.to_string();
-    let writer = std::thread::spawn(move || -> std::io::Result<()> {
-        if let Some(c) = &ctx_owned {
-            stdin.write_all(c.as_bytes())?;
-        }
-        stdin.write_all(task_owned.as_bytes())
-        // stdin dropped here at the end of the closure, closing it and sending EOF to the child.
+    // #29: these threads report back over a channel (not a bare JoinHandle) so the poll loop
+    // below can wait on them with a bounded timeout even after killing the child. A signal-based
+    // kill isn't 100% guaranteed to make a pipe's write-end close promptly on every platform/CI
+    // runner (observed hanging on GitHub Actions' Linux runner even with process-group kill), so
+    // this is defense in depth: if the OS-level kill doesn't unblock the reader fast enough, we
+    // still bound how long we wait on it instead of hanging the whole call forever.
+    let (writer_tx, writer_rx) = mpsc::channel::<std::io::Result<()>>();
+    let (stdout_tx, stdout_rx) = mpsc::channel::<std::io::Result<Vec<u8>>>();
+    let (stderr_tx, stderr_rx) = mpsc::channel::<std::io::Result<Vec<u8>>>();
+    std::thread::spawn(move || {
+        let result = (|| {
+            if let Some(c) = &ctx_owned {
+                stdin.write_all(c.as_bytes())?;
+            }
+            stdin.write_all(task_owned.as_bytes())
+            // stdin dropped here, closing it and sending EOF to the child.
+        })();
+        let _ = writer_tx.send(result);
     });
-    let stdout_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
-        stdout_pipe.read_to_end(&mut buf)?;
-        Ok(buf)
+        let result = stdout_pipe.read_to_end(&mut buf).map(|_| buf);
+        let _ = stdout_tx.send(result);
     });
-    let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
-        stderr_pipe.read_to_end(&mut buf)?;
-        Ok(buf)
+        let result = stderr_pipe.read_to_end(&mut buf).map(|_| buf);
+        let _ = stderr_tx.send(result);
     });
+
+    // How long to wait for the reader/writer threads to report back once we know the child is
+    // no longer running (either it exited on its own, or we just killed it). Generous enough for
+    // a cooperative pipe close under normal load, but still finite.
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
     // #18: poll for exit with a deadline instead of a blocking wait — `wait_with_output()` (the
     // previous approach) has no way to bound how long it blocks. If the deadline passes first,
@@ -417,9 +434,9 @@ fn call_claude(
             }
             let _ = child.kill();
             let _ = child.wait();
-            let _ = writer.join();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
+            let _ = writer_rx.recv_timeout(DRAIN_TIMEOUT);
+            let _ = stdout_rx.recv_timeout(DRAIN_TIMEOUT);
+            let _ = stderr_rx.recv_timeout(DRAIN_TIMEOUT);
             return Err(anyhow!(
                 "claude did not respond within {}s and was killed (check that `{bin}` is \
                  installed, authenticated, and reachable — override with --timeout-secs if a \
@@ -430,17 +447,20 @@ fn call_claude(
         std::thread::sleep(Duration::from_millis(50));
     };
 
-    let stdout_buf = stdout_reader
-        .join()
-        .map_err(|_| anyhow!("stdout reader thread panicked"))?
+    // The child has already exited at this point (the poll loop above only breaks once
+    // `try_wait` confirms that), so its pipe write-ends are closed and these should return
+    // promptly — but bound the wait anyway rather than trusting that unconditionally (see #29).
+    let stdout_buf = stdout_rx
+        .recv_timeout(DRAIN_TIMEOUT)
+        .map_err(|_| anyhow!("stdout reader thread did not report back in time"))?
         .context("failed to read claude's stdout")?;
-    let stderr_buf = stderr_reader
-        .join()
-        .map_err(|_| anyhow!("stderr reader thread panicked"))?
+    let stderr_buf = stderr_rx
+        .recv_timeout(DRAIN_TIMEOUT)
+        .map_err(|_| anyhow!("stderr reader thread did not report back in time"))?
         .context("failed to read claude's stderr")?;
-    writer
-        .join()
-        .map_err(|_| anyhow!("stdin writer thread panicked"))?
+    writer_rx
+        .recv_timeout(DRAIN_TIMEOUT)
+        .map_err(|_| anyhow!("stdin writer thread did not report back in time"))?
         .context("failed to write prompt to claude's stdin")?;
     if !status.success() {
         return Err(anyhow!(
