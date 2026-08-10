@@ -308,11 +308,7 @@ fn run_review(
 
     let optional_selected: Vec<String> = match lenses_arg {
         Some(s) => {
-            let ids: Vec<String> = s
-                .split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .collect();
+            let ids = parse_lenses_arg(s)?;
             for id in &ids {
                 anyhow::ensure!(
                     sp.lens_by_id(id).is_some(),
@@ -641,6 +637,26 @@ fn prepare_out(p: &PathBuf) -> Result<PathBuf> {
     Ok(p.clone())
 }
 
+/// Parses the `--lenses` comma-separated override into trimmed, non-empty ids. Unlike the
+/// LLM-driven auto-selection path (`lens::select_lenses`), which already requires selecting at
+/// least one valid lens, this manual-override path had no equivalent floor: `--lenses ""` (or a
+/// value that is only commas/whitespace, e.g. `--lenses " , ,"`) used to parse to an empty id
+/// list with no error, silently producing a review with zero participating lenses (no findings,
+/// no discourse) that could still report `verdict=PASS score=100/100` — a false-confidence result
+/// for a document nothing actually reviewed.
+fn parse_lenses_arg(s: &str) -> Result<Vec<String>> {
+    let ids: Vec<String> = s
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    anyhow::ensure!(
+        !ids.is_empty(),
+        "--lenses produced no valid lens ids (got only empty/blank entries)"
+    );
+    Ok(ids)
+}
+
 /// Safety net for `--prior` reconciliation: if the fixcheck LLM response silently drops a
 /// finding_id that was in `prior_confirmed` (a known LLM failure mode — the same class of defect
 /// the REQ-ID cross-check in requirements.rs guards against for the coverage-verification call),
@@ -748,6 +764,30 @@ mod tests {
             .find(|fr| fr.finding_id == "f2")
             .expect("f2 must be present after reconciliation");
         assert_eq!(f2.status, "UNKNOWN");
+    }
+
+    #[test]
+    fn parse_lenses_arg_rejects_empty_string() {
+        assert!(parse_lenses_arg("").is_err());
+    }
+
+    #[test]
+    fn parse_lenses_arg_rejects_blank_only_entries() {
+        assert!(parse_lenses_arg(" , , ").is_err());
+    }
+
+    #[test]
+    fn parse_lenses_arg_parses_and_trims_valid_ids() {
+        let ids =
+            parse_lenses_arg("market_dynamics, financial_forensics ,incentive_integrity").unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                "market_dynamics",
+                "financial_forensics",
+                "incentive_integrity"
+            ]
+        );
     }
 
     #[test]
