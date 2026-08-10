@@ -190,6 +190,156 @@ issues:
 | Post-fix round 2 (`--prior`) | success | $0.3707 | `state.json` `cost_usd`, exact |
 | **Total** | | **≈ $0.93–$1.03** | partly exact, partly estimated |
 
+## Round 4: production hardening pass (#18-#25)
+
+A separate, later session from Round 1/2/Execution review above (#2-#10). Same
+methodology, same rule (report what was measured, flag what's estimated) — three
+zero-cost activities (adversarial re-audit, edge-case test expansion, versioning),
+then a real-cost execution-verification run that went one round deeper than the
+2-round chain above (3 rounds instead of 2) and, on the third round, hit an actual
+crash that the first two rounds never exercised.
+
+### TL;DR
+
+| Phase | Method | Real cost | Outcome |
+|---|---|---|---|
+| Adversarial re-audit | reading `src/`, no LLM calls | $0 | 2 fixed (#18, #19) — PR #20 |
+| Edge-case test expansion | new tests, no LLM calls | $0 | tests 44→52 — PR #21 |
+| Versioning | `git log` + `gh issue list` cross-check, no LLM calls | $0 | `CHANGELOG.md`, `v0.1.0` tag+release — PR #22 |
+| Execution verification, round 1 | `review --lenses market_dynamics,financial_forensics,incentive_integrity,engineering_diligence --model haiku` | $1.0567 (`state.json`, 15 calls) | success |
+| Execution verification, round 2 | same, `--prior <round-1-dir>` | $1.3207 (`state.json`, 20 calls) | success — confirmed #8's retry loop and #10's semantic dedup both hold up live |
+| Execution verification, round 3 | same, `--prior <round-2-dir>` | unmeasured — crashed before any usage summary printed | **crashed** — new bug found (#23) — PR #24 fix, PR #25 CHANGELOG |
+| **Total, this round** | | **$2.3774 exact (rounds 1-2) + ≈$0.3-$0.6 unmeasured (round 3)** | 3 bugs fixed (#18, #19, #23); 44→52→53 tests |
+
+### 1. Adversarial re-audit: #18, #19 (no LLM calls)
+
+A fresh pass over `src/`, independent of the Round 1/2 static reviews above, specifically
+looking for resource-exhaustion and hang vectors rather than logic bugs.
+
+- **#18 — no timeout on either LLM backend.** `call_claude` blocked forever on
+  `wait_with_output()` if the `claude` subprocess hung (stalled auth prompt, network stall,
+  wedged internal retry) — no recovery, no partial output. `call_openrouter`'s `ureq::Agent`
+  had no `timeout_global` set at all, unlike `checks.rs`'s already-hardened `safe_fetch`.
+  Fixed by having `call_claude` poll `try_wait()` against a deadline (stdin/stdout/stderr
+  each on their own thread, same pattern as the earlier #4 deadlock fix) and kill the child
+  on timeout, and giving `call_openrouter` the same `timeout_global` treatment. Both are
+  driven by a new `--timeout-secs` flag, default 300s.
+- **#19 — no size cap reading `--document`/`--brief`/`--style`/`--deterministic-results`.**
+  Plain `std::fs::read_to_string`, unbounded. A huge file, or a symlink to an
+  infinite-but-valid-UTF-8 special file (`/dev/zero`, whose `fs::metadata().len()` reports
+  `0` — a metadata-only pre-check would not catch it), would be read fully into memory before
+  `main.rs`'s existing `DOC_WARN_CHARS` check even runs (that check only warns about cost,
+  and only *after* the full read already succeeded). Fixed with a 64MB bounded reader
+  (`Read::take` on the actual bytes read, not a metadata pre-check), so both failure modes
+  fail fast and cleanly.
+
+PR [#20](https://github.com/Loop-Suite/Research-Loop/pull/20), merged. `cargo test`: 44
+passed (6 new: 2 timeout tests in `llm.rs`, 4 size-cap tests in `input.rs`, one reproducing
+the `/dev/zero` symlink case).
+
+### 2. Edge-case regression tests
+
+Coverage expansion requested independently of the #18/#19 fixes, targeting failure paths
+the existing suite didn't touch:
+
+- Empty / whitespace-only document rejection.
+- Non-UTF8 file content (corrupted encoding).
+- Malformed (non-JSON) `--deterministic-results`.
+- Unicode extremes through the document-parsing and `escape_fence` paths: RTL Arabic/Hebrew
+  text, an emoji ZWJ sequence, stacked combining diacritics — proving no byte-boundary
+  panics.
+- Subprocess-failure simulation via fake `claude` scripts: non-zero exit with a stderr
+  message, and stdout that isn't the expected JSON envelope at all.
+
+No production code changes, tests only. PR [#21](https://github.com/Loop-Suite/Research-Loop/pull/21),
+merged. `cargo test`: 52 passed (up from 44).
+
+### 3. Versioning: `CHANGELOG.md` + `v0.1.0`
+
+`CHANGELOG.md` was compiled from the full `git log` history cross-checked against the real
+`gh issue list --state all` output, not from in-code `#N` comments alone — some in-code `#N`
+references turned out to be design-doc section numbers, not GitHub issue numbers, and were
+filtered out during this cross-check rather than copied in as if they were issues. PR
+[#22](https://github.com/Loop-Suite/Research-Loop/pull/22), merged (docs only, no code
+change; `Cargo.toml` was already at `0.1.0`).
+
+Tagged and released: **[`v0.1.0`](https://github.com/Loop-Suite/Research-Loop/releases/tag/v0.1.0)**,
+commit `12b15a6` (the PR #22 merge commit) — everything through the adversarial re-audit and
+edge-case test expansion above, 52 tests.
+
+### 4. Execution verification: a real 3-round `--prior` chain
+
+Setup: `research review --lenses market_dynamics,financial_forensics,incentive_integrity,engineering_diligence --model haiku`
+against a raw research document, written for this verification pass, then chained twice more
+via `--prior` — one round deeper than the 2-round chain in the Execution review section
+above, specifically to exercise `--prior` reinsertion a second time in a row.
+
+- **Round 1: success.** $1.0567, 15 real LLM calls (`state.json` `cost_usd`, exact).
+- **Round 2 (`--prior <round-1-dir>`): success.** $1.3207, 20 real LLM calls (`state.json`
+  `cost_usd`, exact). This is the first time #8's `json_typed` retry loop and #10's semantic
+  dedup pass (`src/dedup.rs`) — both previously verified only in the 2-round chain above —
+  ran back-to-back in a 2-round `--prior` reinsertion cycle with a 4-lens spread instead of
+  2; both held up with no regressions observed in the output.
+- **Round 3 (`--prior <round-2-dir>`): crashed. New bug — #23.** The `market_dynamics`
+  discourse critic call exhausted its retry budget after 3 different malformed-JSON shapes
+  in a row from haiku, aborting the run — but only *after* all 4 of that round's lens-review
+  calls had already completed and been costed. `main()` printed only the `Error: ...` line;
+  the cost of those 4 already-completed calls (plus the 3 failed critic attempts) was nowhere
+  in the output, in any file, or recoverable after the fact — no `report.md`, no
+  `state.json`, and (unlike a clean success) no usage/cost line either. Filed as
+  [#23](https://github.com/Loop-Suite/Research-Loop/issues/23).
+
+  **Fix:** `main()` now builds the shared `Llm` usage tracker itself and prints its summary
+  on the `Err` exit path too, not only on success — previously each `run_review`/
+  `run_describe`/`run_improve`/`run_ask` printed the summary as its own last line before
+  returning `Ok`, so any error path skipped it entirely. Verified with a new
+  subprocess-level integration test (`tests/cli_usage_on_failure.rs`) that drives the actual
+  compiled binary against a fake `claude` script, since the fixed behavior lives in
+  `main()`'s own process-exit orchestration and isn't reachable by calling a function
+  directly. PR [#24](https://github.com/Loop-Suite/Research-Loop/pull/24), merged.
+  `CHANGELOG.md`'s `[Unreleased]` section documents the fix — PR
+  [#25](https://github.com/Loop-Suite/Research-Loop/pull/25), merged.
+
+  **Round 3 was deliberately not re-run after the fix.** The first two rounds already give
+  exact, measured cost; a fourth real-API round to re-confirm round 3 specifically was judged
+  out of scope for this pass — the fix is instead verified by the subprocess-level
+  integration test above, which reproduces the same "calls already costed, then failure"
+  shape deterministically without spending more real money on it.
+
+**Cost detail for this run:**
+
+| Round | Outcome | Cost | Source |
+|---|---|---|---|
+| 1 | success | $1.0567 (15 calls) | `state.json` `cost_usd`, exact |
+| 2 (`--prior`) | success | $1.3207 (20 calls) | `state.json` `cost_usd`, exact |
+| 3 (`--prior`) | crashed after 4 lens-review calls | unmeasured | 불확실 — no `state.json` written; estimated ≈$0.3-$0.6 by scaling round 1's per-call average ($1.0567 / 15 ≈ $0.07/call) up to account for the 4 completed lens-review calls plus 3 failed critic-call attempts, not a precise figure |
+| **Total** | | **$2.3774 exact + ≈$0.3-$0.6 estimated** | partly exact, partly estimated, same convention as the Execution review section above |
+
+### 5. Investigated, confirmed not bugs
+
+- **Discourse surfaced-finding ids reset every round and can look repeated in the raw text**
+  across a multi-round `--prior` chain. Checked directly against the reinsertion code path:
+  every *reinserted* id (`STILL_OPEN`/`UNKNOWN`) always carries a round-scoped suffix (the
+  same `"{id}-still-open-r{round}"` pattern from the #2 fix above), so there is no actual id
+  collision or data loss — just a cosmetic appearance of repetition in a human reading the
+  raw findings list across rounds. No fix needed, no issue filed.
+- **Score inflation when independent lenses each surface the same root fact** (e.g. multiple
+  lenses independently flagging the same underlying ARR contradiction, via different wording)
+  was observed again in this round's real output. This is the same class of effect #10 above
+  already measured and documented, and `evals/README.md` already states plainly that #10 is
+  deliberately left open pending semantic-matching design work — this round's observation
+  doesn't change that; not re-opened or re-scoped here.
+
+### v0.1.0 tag does not include #23/#24/#25
+
+**`git log v0.1.0..main` shows 2 commits not in the tagged release:** the #23 fix (PR #24)
+and its `CHANGELOG.md` entry (PR #25). The `v0.1.0` tag points at the PR #22 merge commit
+(`12b15a6`) — everything through the CHANGELOG/versioning work above, but *before* the
+execution-verification run that found #23. **The usage-summary-on-failure fix is on `main`,
+not in any tagged release yet.** `CHANGELOG.md`'s `[Unreleased]` section reflects this
+correctly (it lists the #23 fix separately from the `[0.1.0]` section). Anyone building from
+the `v0.1.0` tag specifically — rather than `main` — still has the bug #23 describes.
+
 ## Limitations and caveats
 
 - **This is one review session's log, not a benchmark.** One document, one model (`haiku`),
@@ -209,3 +359,18 @@ issues:
   execution run beyond the one 2-round chain reported here** — #2, #3's reordering, #5, #6, and
   #7 are covered by unit tests added in their respective commits (see each commit's diff), not
   by a further live model run specifically targeting each one.
+- **Round 4's crash cost (#23, round 3 of its own 3-round chain) is a real but unmeasured
+  cost, estimated by scaling round 1's per-call average, not read from any file** — no
+  `state.json` was written for that crashed round, unlike every other cost figure in this
+  document. Reported as a range and marked 불확실, per the same convention as the
+  pre-fix-#8 estimate above.
+- **Round 4's round 3 was not re-run after the #23 fix.** Unlike #8 above (re-run against the
+  same real failure and confirmed recovered), the #23 fix was verified by a deterministic
+  subprocess-level integration test instead of spending a fourth real-API round to reproduce
+  the exact same crash condition again — a real re-run would additionally have needed a fresh
+  malformed-JSON response from haiku to trigger the same code path, which isn't reliably
+  reproducible on demand.
+- **`v0.1.0` does not include the #23 fix.** The tag was cut at the PR #22 merge commit,
+  before the execution-verification run that found #23. The fix (PR #24) and its changelog
+  entry (PR #25) are on `main` only, under `CHANGELOG.md`'s `[Unreleased]` section — not in
+  any tagged release as of this writing.
