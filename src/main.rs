@@ -385,6 +385,7 @@ fn run_review(
             .cloned()
             .collect();
         fix_results = fixcheck::run(cheap_llm, &sp, &inp, &prior_confirmed)?;
+        fix_results = reconcile_fix_results(&prior_confirmed, fix_results);
         for fr in &fix_results {
             let Some(orig) = prior_confirmed.iter().find(|f| f.id == fr.finding_id) else {
                 continue;
@@ -640,6 +641,36 @@ fn prepare_out(p: &PathBuf) -> Result<PathBuf> {
     Ok(p.clone())
 }
 
+/// Safety net for `--prior` reconciliation: if the fixcheck LLM response silently drops a
+/// finding_id that was in `prior_confirmed` (a known LLM failure mode — the same class of defect
+/// the REQ-ID cross-check in requirements.rs guards against for the coverage-verification call),
+/// the run_review loop below only iterates over `fix_results`, so a dropped id previously just
+/// vanished from findings/report/score with no trace and no human-review flag — worse than
+/// UNKNOWN, which is at least explicit. This synthesizes a deterministic UNKNOWN entry (so it
+/// re-enters findings and forces needs_human_review, same as an explicit UNKNOWN from the LLM)
+/// for every prior_confirmed id absent from fix_results.
+fn reconcile_fix_results(
+    prior_confirmed: &[Finding],
+    mut fix_results: Vec<fixcheck::FixStatus>,
+) -> Vec<fixcheck::FixStatus> {
+    let seen: std::collections::HashSet<String> =
+        fix_results.iter().map(|fr| fr.finding_id.clone()).collect();
+    for orig in prior_confirmed {
+        if !seen.contains(&orig.id) {
+            fix_results.push(fixcheck::FixStatus {
+                finding_id: orig.id.clone(),
+                status: "UNKNOWN".to_string(),
+                evidence: "This finding_id is absent from the fix-check LLM response — \
+                    deterministically forced to UNKNOWN by the code (prevents a previously \
+                    confirmed finding from silently vanishing when the model drops it from its \
+                    output)"
+                    .to_string(),
+            });
+        }
+    }
+    fix_results
+}
+
 /// Runs threads in batches of `concurrency`, sequentially (barrier per chunk).
 /// discourse.rs's independent per-lens critic calls (#1) also reuse this helper.
 pub(crate) fn par_map<T, R, F>(concurrency: usize, items: Vec<T>, f: F) -> Result<Vec<R>>
@@ -670,4 +701,65 @@ where
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finding(id: &str) -> Finding {
+        Finding {
+            id: id.to_string(),
+            section: "sec".to_string(),
+            citation_ref: "1".to_string(),
+            claim: format!("claim-{id}"),
+            evidence: format!("evidence-{id}"),
+            impact: String::new(),
+            severity: "P0".to_string(),
+            label: "x".to_string(),
+            confidence: "medium".to_string(),
+            recommendation: String::new(),
+            lens: "lens_a".to_string(),
+            reviewer: String::new(),
+            citation_status: "UNVERIFIED".to_string(),
+            llm_citation_status: String::new(),
+        }
+    }
+
+    /// Reproduces a known LLM failure mode (JSON truncation / dropping a list item): the
+    /// fixcheck LLM response omits one of the previously-confirmed findings entirely. Before this
+    /// reconciliation existed, that finding simply vanished — not FIXED, not STILL_OPEN, not
+    /// UNKNOWN, no needs_human_review flag, nothing. It must instead re-appear, forced to UNKNOWN.
+    #[test]
+    fn reconcile_fix_results_forces_unknown_for_ids_missing_from_llm_response() {
+        let prior_confirmed = vec![finding("f1"), finding("f2")];
+        let fix_results = vec![fixcheck::FixStatus {
+            finding_id: "f1".to_string(),
+            status: "STILL_OPEN".to_string(),
+            evidence: "still present".to_string(),
+        }];
+        // Sanity check: f2 really is absent from the raw LLM output before reconciliation.
+        assert!(!fix_results.iter().any(|fr| fr.finding_id == "f2"));
+
+        let reconciled = reconcile_fix_results(&prior_confirmed, fix_results);
+        assert_eq!(reconciled.len(), 2, "f2 must not silently vanish");
+        let f2 = reconciled
+            .iter()
+            .find(|fr| fr.finding_id == "f2")
+            .expect("f2 must be present after reconciliation");
+        assert_eq!(f2.status, "UNKNOWN");
+    }
+
+    #[test]
+    fn reconcile_fix_results_is_a_no_op_when_llm_covers_every_id() {
+        let prior_confirmed = vec![finding("f1")];
+        let fix_results = vec![fixcheck::FixStatus {
+            finding_id: "f1".to_string(),
+            status: "FIXED".to_string(),
+            evidence: "addressed".to_string(),
+        }];
+        let reconciled = reconcile_fix_results(&prior_confirmed, fix_results);
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].status, "FIXED");
+    }
 }
