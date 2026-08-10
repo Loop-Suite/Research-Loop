@@ -299,6 +299,26 @@ This was run against the research document that motivated it (MangroveCafeOrder'
 
 The evidence survey didn't stop at README pages. Reading actual source files in `assafelovic/gpt-researcher`, `guy-hartstein/company-research-agent`, and `geekan/MetaGPT` corrected one of the survey's own earlier claims: GPT Researcher's README implies "most-frequent-info-wins" voting, but its actual `curator.py` does vector-similarity filtering plus a single LLM ranking pass — no contradiction detection either way. `company-research-agent` (LangGraph + Gemini 2.5 + GPT-5.1, solving the *same problem* as research-loop) turned out to be a strictly sequential 6-node pipeline with zero cross-validation anywhere in its source. Full writeup, including the self-correction: [docs/research-and-evidence-survey-2026-07-31.md §8](docs/research-and-evidence-survey-2026-07-31.md).
 
+## Real-world validation
+
+`research`'s own `--prior`-chained review pipeline was also run against itself: real
+`claude -p --model haiku` execution (2 rounds, round 2 via `--prior` on round 1's output),
+preceded by a static code review of that same `--prior` code path. Full methodology, every raw
+number, and caveats (one document, one model, no benchmark matrix):
+[evals/README.md](evals/README.md).
+
+- **9 real bugs found** — 6 from zero-cost static review alone (including a real
+  prompt-injection fence-escaping bypass and a reproduced `std::process` pipe deadlock), 3 more
+  surfaced only by actual execution, incl. **#8**: a valid-but-wrong-shape haiku response crashed
+  the entire run pre-fix, discarding all LLM spend already made — a class of bug code reading
+  alone doesn't catch.
+- **#10** (`--prior` STILL_OPEN reinsertion double-counting an unaddressed issue's severity)
+  needed semantic (LLM-judged) dedup, not a deterministic key — a `lens`+`section`+`label` key
+  was tried against the real reproduction and confirmed insufficient. Logged as open in the eval
+  write-up; fixed separately afterward (`src/dedup.rs`).
+- **Total real spend: ≈ $0.93–$1.03** across the session (two successful rounds at $0.4136 +
+  $0.3707, exact from `state.json`, plus one pre-fix crashed attempt estimated at $0.15–$0.25).
+
 ## Known limitations
 
 Tracked as GitHub issues against this repo; 11 are closed, 1 remains open.
