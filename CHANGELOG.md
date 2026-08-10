@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A run that failed partway through (e.g. discourse exhausting its retry budget on a real
+  model that produced 3 different malformed response shapes in a row) discarded the
+  accumulated LLM usage/cost summary along with everything else — only the success path ever
+  printed it. Found live during this project's own additional real-execution verification
+  round (a 3-round `--prior` chain, `--model haiku`): round 3 crashed after 4 real,
+  already-costed lens-review calls had completed, and the run reported only the error, with
+  that spend nowhere in the output. `main()` now prints the usage summary on any exit once at
+  least one LLM call has been made, not only on success. (#23)
+
 ## [0.1.0] - 2026-08-10
 
 Initial tagged release. This version covers all work from the initial commit through
