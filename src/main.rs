@@ -145,9 +145,28 @@ enum Cmd {
 }
 
 fn main() {
-    match real_main() {
+    let cli = Cli::parse();
+    let (llm, cheap_llm) = match build_llm(&cli) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    match dispatch(&cli, &llm, &cheap_llm) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
+            // #23: a failure partway through a run (e.g. discourse exhausting its retry budget
+            // on a real model that produced 3 different malformed response shapes in a row —
+            // reproduced for real in this session's execution-verification round) must not
+            // silently discard the cost of every LLM call already made earlier in the same run.
+            // Each run_*() function already prints llm.usage().summary() as its last line on
+            // success; this is the equivalent for every other exit path, so a run that spent
+            // real money before failing always reports what it spent, not nothing.
+            let usage = llm.usage();
+            if usage.calls > 0 {
+                eprintln!("{}", usage.summary());
+            }
             eprintln!("Error: {e:#}");
             std::process::exit(1);
         }
@@ -189,10 +208,7 @@ fn build_llm(cli: &Cli) -> Result<(Llm, Llm)> {
 
 /// PASS=0, REVISE=1 (#12) — only the review subcommand has a verdict-based exit code. The other
 /// subcommands always return 0 on normal completion (errors are handled by main()'s Err branch via exit(1), not this function).
-fn real_main() -> Result<i32> {
-    let cli = Cli::parse();
-    let (llm, cheap_llm) = build_llm(&cli)?;
-
+fn dispatch(cli: &Cli, llm: &Llm, cheap_llm: &Llm) -> Result<i32> {
     match &cli.cmd {
         Cmd::Review {
             spec,
@@ -208,8 +224,8 @@ fn real_main() -> Result<i32> {
             as_of_year,
             skip_link_check,
         } => run_review(
-            &llm,
-            &cheap_llm,
+            llm,
+            cheap_llm,
             spec,
             document,
             brief,
@@ -230,7 +246,7 @@ fn real_main() -> Result<i32> {
             style,
             out,
         } => {
-            run_describe(&llm, spec, document, brief, style, out)?;
+            run_describe(llm, spec, document, brief, style, out)?;
             Ok(0)
         }
         Cmd::Improve {
@@ -240,7 +256,7 @@ fn real_main() -> Result<i32> {
             style,
             out,
         } => {
-            run_improve(&llm, spec, document, brief, style, out)?;
+            run_improve(llm, spec, document, brief, style, out)?;
             Ok(0)
         }
         Cmd::Ask {
@@ -251,7 +267,7 @@ fn real_main() -> Result<i32> {
             out,
             question,
         } => {
-            run_ask(&llm, spec, document, brief, style, out, question)?;
+            run_ask(llm, spec, document, brief, style, out, question)?;
             Ok(0)
         }
     }
