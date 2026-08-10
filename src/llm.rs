@@ -256,19 +256,34 @@ fn call_claude(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to run `{bin}` (check it's installed and on PATH)"))?;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("failed to open stdin"))?;
-        if let Some(c) = ctx {
+
+    // Write stdin from a dedicated thread rather than inline: if the child writes enough to
+    // stdout/stderr before it has finished reading stdin, the OS pipe buffer for those (typically
+    // 16-64KB) fills up and the child blocks on its own write — while this thread would still be
+    // blocked writing ctx+task (shared_context embeds the *entire* research document, easily
+    // hundreds of KB) to stdin, with nothing yet reading stdout/stderr to unblock it. That's a
+    // classic std::process deadlock. Spawning the write onto its own thread lets
+    // wait_with_output() below start draining stdout/stderr concurrently with the write, so
+    // neither side can starve the other.
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to open stdin"))?;
+    let ctx_owned = ctx.map(|c| c.to_string());
+    let task_owned = task.to_string();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        if let Some(c) = &ctx_owned {
             stdin.write_all(c.as_bytes())?;
         }
-        stdin.write_all(task.as_bytes())?;
-    }
-    drop(child.stdin.take());
+        stdin.write_all(task_owned.as_bytes())
+        // stdin dropped here at the end of the closure, closing it and sending EOF to the child.
+    });
 
     let out = child.wait_with_output()?;
+    writer
+        .join()
+        .map_err(|_| anyhow!("stdin writer thread panicked"))?
+        .context("failed to write prompt to claude's stdin")?;
     if !out.status.success() {
         return Err(anyhow!(
             "claude exited with code {:?}: {}",
@@ -456,5 +471,56 @@ pub fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(n).collect::<String>() + "…"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Regression test for a classic std::process pipe deadlock: `call_claude` used to write
+    /// ctx+task to the child's stdin synchronously, in the same thread, before anything started
+    /// reading the child's stdout/stderr. If the child writes enough to stdout/stderr before it
+    /// has finished reading stdin (progress output, warnings, etc.), the OS pipe buffer for that
+    /// (typically 16-64KB) fills up and the child blocks on its own write — while we're still
+    /// blocked writing a potentially much larger ctx (shared_context embeds the *entire* research
+    /// document, easily hundreds of KB) to its stdin. Neither side can make progress. This is
+    /// simulated with a small child script that writes 2MB to stdout before draining stdin.
+    #[test]
+    fn call_claude_does_not_deadlock_on_large_ctx_with_eager_child_output() {
+        let mut script_path = std::env::temp_dir();
+        script_path.push(format!(
+            "research_loop_fake_claude_{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\nhead -c 2000000 /dev/zero\ncat >/dev/null\nprintf '{\"result\":\"ok\"}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let big_ctx = "X".repeat(2_000_000); // far exceeds any OS pipe buffer
+        let bin = script_path.to_string_lossy().to_string();
+
+        let (tx, rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _ = call_claude(&bin, None, Some(&big_ctx), "task", None);
+            let _ = tx.send(());
+        });
+
+        let finished = rx.recv_timeout(Duration::from_secs(15)).is_ok();
+        let _ = std::fs::remove_file(&script_path);
+        assert!(
+            finished,
+            "call_claude did not return within 15s — likely deadlocked writing a large ctx to \
+             stdin while the child wrote to stdout before draining stdin"
+        );
     }
 }
