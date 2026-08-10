@@ -396,9 +396,16 @@ fn call_claude(
         let _ = writer_tx.send(result);
     });
     std::thread::spawn(move || {
+        eprintln!("[llm debug] stdout_reader thread started");
         let mut buf = Vec::new();
-        let result = stdout_pipe.read_to_end(&mut buf).map(|_| buf);
-        let _ = stdout_tx.send(result);
+        let result = stdout_pipe.read_to_end(&mut buf);
+        eprintln!(
+            "[llm debug] stdout_reader read_to_end -> {:?} (len {})",
+            result.as_ref().map(|_| ()),
+            buf.len()
+        );
+        let send_res = stdout_tx.send(result.map(|_| buf));
+        eprintln!("[llm debug] stdout_reader send -> {:?}", send_res.is_ok());
     });
     std::thread::spawn(move || {
         let mut buf = Vec::new();
