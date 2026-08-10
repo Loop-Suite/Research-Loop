@@ -104,6 +104,96 @@ pub fn summarize(
 mod quantify_tests {
     use super::*;
 
+    fn finding(id: &str, severity: &str) -> Finding {
+        Finding {
+            id: id.to_string(),
+            section: "sec".to_string(),
+            citation_ref: "1".to_string(),
+            claim: format!("claim-{id}"),
+            evidence: format!("evidence-{id}"),
+            impact: String::new(),
+            severity: severity.to_string(),
+            label: "x".to_string(),
+            confidence: "medium".to_string(),
+            recommendation: String::new(),
+            lens: "market_dynamics".to_string(),
+            reviewer: String::new(),
+            citation_status: "UNVERIFIED".to_string(),
+            llm_citation_status: String::new(),
+        }
+    }
+
+    /// Reproduces issue #10's core symptom and its fix: a --prior STILL_OPEN reinsertion and this
+    /// round's own fresh rediscovery of the same real-world issue must be deducted once, not
+    /// twice. dedup.rs judges the fresh finding a semantic duplicate and main.rs downgrades its
+    /// resolution to MERGED (reusing the same status/score-exclusion discourse.rs already applies
+    /// to same-round cross-lens duplicates) — score() only sums CONFIRMED findings, so a MERGED
+    /// finding contributes nothing.
+    #[test]
+    fn merged_resolution_excludes_semantic_duplicate_from_score() {
+        let findings = vec![
+            finding("market_dynamics-3-still-open-r2", "P1"), // reinserted, kept CONFIRMED
+            finding("market_dynamics-3", "P1"), // fresh rediscovery, downgraded to MERGED by dedup
+        ];
+        let mut resolved: HashMap<String, Resolution> = HashMap::new();
+        resolved.insert(
+            "market_dynamics-3-still-open-r2".to_string(),
+            Resolution {
+                finding_id: "market_dynamics-3-still-open-r2".to_string(),
+                status: "CONFIRMED".to_string(),
+                merged_into: String::new(),
+                reason: "STILL_OPEN vs. previous round".to_string(),
+                needs_human_review: false,
+            },
+        );
+        resolved.insert(
+            "market_dynamics-3".to_string(),
+            Resolution {
+                finding_id: "market_dynamics-3".to_string(),
+                status: "MERGED".to_string(),
+                merged_into: "market_dynamics-3-still-open-r2".to_string(),
+                reason: "Semantic duplicate of --prior STILL_OPEN reinsertion".to_string(),
+                needs_human_review: false,
+            },
+        );
+        let (total, deductions) = score(&findings, &resolved);
+        assert_eq!(
+            total, 88,
+            "one P1 (-12) deduction, not two (-24) — the MERGED duplicate must not be scored"
+        );
+        assert_eq!(deductions.len(), 1);
+    }
+
+    /// Negative control for the test above: proves it actually exercises the fix, by showing what
+    /// the pre-#10-fix behavior (both copies left CONFIRMED) produces — a double deduction for one
+    /// real issue, exactly the bug issue #10 reports.
+    #[test]
+    fn without_dedup_merge_the_same_issue_is_double_counted() {
+        let findings = vec![
+            finding("market_dynamics-3-still-open-r2", "P1"),
+            finding("market_dynamics-3", "P1"),
+        ];
+        let mut resolved: HashMap<String, Resolution> = HashMap::new();
+        for f in &findings {
+            resolved.insert(
+                f.id.clone(),
+                Resolution {
+                    finding_id: f.id.clone(),
+                    status: "CONFIRMED".to_string(),
+                    merged_into: String::new(),
+                    reason: String::new(),
+                    needs_human_review: false,
+                },
+            );
+        }
+        let (total, deductions) = score(&findings, &resolved);
+        assert_eq!(
+            total, 76,
+            "both left CONFIRMED means -24 total for one real issue — the pre-fix bug shape"
+        );
+        assert_eq!(deductions.len(), 2);
+    }
+
     #[test]
     fn hard_evidence_check_fail_forces_revise_regardless_of_findings() {
         let findings: Vec<Finding> = Vec::new();

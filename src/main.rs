@@ -1,5 +1,6 @@
 mod ask;
 mod checks;
+mod dedup;
 mod describe;
 mod discourse;
 mod fixcheck;
@@ -362,12 +363,28 @@ fn run_review(
         discourse::run(llm, &sp, &mut findings, max_rounds, concurrency)?
     };
 
+    // #10: captured here, before the --prior reinsertion block below mutates `findings`/`resolved`
+    // — the semantic dedup pass needs this round's own fresh CONFIRMED findings (from this round's
+    // independent lens pass + discourse), untouched by anything reinserted from a previous round.
+    let fresh_confirmed: Vec<Finding> = findings
+        .iter()
+        .filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED"))
+        .cloned()
+        .collect();
+
     // #7: --prior recheck results are explicitly branched into 4 outcomes: FIXED (close)/
     // STILL_OPEN (keep)/REVERSED (new high-risk finding)/UNKNOWN (keep + flag for human review).
     // Previously only STILL_OPEN/REVERSED were handled and the rest (especially UNKNOWN) silently
     // disappeared from findings/score — treating "cannot verify" as "resolved" is a safety issue,
     // so UNKNOWN is now always kept and requires human confirmation.
     let mut fix_results: Vec<fixcheck::FixStatus> = Vec::new();
+    // #10: STILL_OPEN reinsertions collected here so they can be checked against fresh_confirmed
+    // for semantic duplicates right after this block (see the dedup::run call below). Only
+    // STILL_OPEN participates — REVERSED is deliberately promoted into a new high-risk finding
+    // (a signal worth keeping distinct even if the underlying fact overlaps) and UNKNOWN is
+    // already flagged for human review, so neither is the "unaddressed issue counted twice" shape
+    // issue #10 reports.
+    let mut still_open_reinsertions: Vec<Finding> = Vec::new();
     if let Some(ps) = &prior_state {
         let prior_confirmed: Vec<Finding> = ps
             .findings
@@ -409,6 +426,7 @@ fn run_review(
                             needs_human_review: false,
                         },
                     );
+                    still_open_reinsertions.push(still_open);
                 }
                 "REVERSED" => {
                     // The prior conclusion itself has been overturned — instead of reusing the
@@ -459,6 +477,38 @@ fn run_review(
                     );
                 }
             }
+        }
+    }
+
+    // #10: this round's own fresh lens pass can independently rediscover the exact same
+    // real-world issue a STILL_OPEN reinsertion above is already flagging as unaddressed — under a
+    // different id, and often a different label/citation_ref too, since those are self-reported
+    // per LLM call rather than stable across rounds (see dedup.rs doc comment / issue #10 for the
+    // reproduction). One semantic-dedup LLM call resolves overlaps the same way discourse.rs
+    // already resolves same-round cross-lens duplicates: MERGED. The fresh (this-round) finding is
+    // the one downgraded to MERGED — the reinserted finding is kept, since it's the one carrying
+    // the cross-round "STILL_OPEN vs previous round" continuity evidence the next round's fixcheck
+    // needs. quantify::summarize only scores CONFIRMED findings, so this is what actually stops
+    // the same unaddressed issue from being deducted twice.
+    for pair in dedup::run(cheap_llm, &still_open_reinsertions, &fresh_confirmed)? {
+        if resolved.get(&pair.fresh_id).map(|r| r.status.as_str()) == Some("CONFIRMED") {
+            println!(
+                "  Dedup: {} merged into {} (same issue as a --prior STILL_OPEN reinsertion — {})",
+                pair.fresh_id, pair.reinserted_id, pair.reason
+            );
+            resolved.insert(
+                pair.fresh_id.clone(),
+                discourse::Resolution {
+                    finding_id: pair.fresh_id.clone(),
+                    status: "MERGED".to_string(),
+                    merged_into: pair.reinserted_id.clone(),
+                    reason: format!(
+                        "Semantic duplicate of --prior STILL_OPEN reinsertion {}: {}",
+                        pair.reinserted_id, pair.reason
+                    ),
+                    needs_human_review: false,
+                },
+            );
         }
     }
 
