@@ -339,6 +339,17 @@ fn call_claude(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // #29: put the child in its own process group so a timeout kill can take out any subprocess
+    // it spawns too, not just the direct child. Without this, `child.kill()` below only kills
+    // `bin` itself — if `bin` (a shell wrapper, or `claude` internally) forks a helper process,
+    // that grandchild inherits the stdout/stderr pipe write-ends and keeps them open forever,
+    // so the reader threads' `read_to_end()` never sees EOF even after the "timeout" fires.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to run `{bin}` (check it's installed and on PATH)"))?;
@@ -393,6 +404,17 @@ fn call_claude(
             break status;
         }
         if Instant::now() >= deadline {
+            // #29: kill the whole process group (the child is its own group leader, see spawn
+            // above), not just the direct child — a grandchild process would otherwise survive
+            // and keep the stdout/stderr pipes open, hanging the reader threads below forever.
+            #[cfg(unix)]
+            {
+                let pgid = child.id();
+                let _ = Command::new("kill")
+                    .arg("-KILL")
+                    .arg(format!("-{pgid}"))
+                    .status();
+            }
             let _ = child.kill();
             let _ = child.wait();
             let _ = writer.join();
