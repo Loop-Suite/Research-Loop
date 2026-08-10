@@ -101,7 +101,7 @@ flowchart TB
 
 ## Requirements
 
-- Rust 1.70+
+- Rust 1.85+ (enforced via `rust-version` in `Cargo.toml` and CI's MSRV matrix job)
 - `claude` CLI installed and logged in (pass `--claude-bin` if it's not on `PATH`), or `OPENROUTER_API_KEY` if using `--backend openrouter`
 
 ## Build
