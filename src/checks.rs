@@ -436,8 +436,8 @@ struct FetchOutcome {
     body: Option<Vec<u8>>, // Some only for GET
 }
 
-fn read_bounded(resp: ureq::Response, max_bytes: usize) -> Result<Vec<u8>> {
-    let mut reader = resp.into_reader().take(max_bytes as u64 + 1);
+fn read_bounded(body: ureq::Body, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut reader = body.into_reader().take(max_bytes as u64 + 1);
     let mut buf = Vec::new();
     reader
         .read_to_end(&mut buf)
@@ -447,26 +447,27 @@ fn read_bounded(resp: ureq::Response, max_bytes: usize) -> Result<Vec<u8>> {
 }
 
 /// HEAD/GET request with SSRF defenses applied. Disables ureq's automatic redirect tracking
-/// (`.redirects(0)`) and instead loops manually, re-running [`validate_url_safe`] on every hop.
+/// (`max_redirects(0)`) and instead loops manually, re-running [`validate_url_safe`] on every hop.
+/// Also disables ureq's automatic status->error conversion (`http_status_as_error(false)`) so
+/// 4xx/5xx responses come back as `Ok` and we can inspect their status/headers/body ourselves,
+/// same as the manual `Err(ureq::Error::Status(_, r)) => r` handling this replaces.
 /// GET responses are capped at 1MB.
 fn safe_fetch(raw_url: &str, method_get: bool) -> Result<FetchOutcome> {
     let mut current = validate_url_safe(raw_url)?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(8))
-        .redirects(0)
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(8)))
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build()
+        .into();
     for hop in 0..=MAX_REDIRECTS {
         let req = if method_get {
             agent.get(current.as_str())
         } else {
             agent.head(current.as_str())
         };
-        let resp = match req.call() {
-            Ok(r) => r,
-            Err(ureq::Error::Status(_, r)) => r,
-            Err(e) => return Err(anyhow!("Request failed: {e}")),
-        };
-        let status = resp.status();
+        let resp = req.call().map_err(|e| anyhow!("Request failed: {e}"))?;
+        let status = resp.status().as_u16();
         if (300..400).contains(&status) {
             anyhow::ensure!(
                 hop < MAX_REDIRECTS,
@@ -474,8 +475,11 @@ fn safe_fetch(raw_url: &str, method_get: bool) -> Result<FetchOutcome> {
                 MAX_REDIRECTS
             );
             let location = resp
-                .header("Location")
+                .headers()
+                .get("Location")
                 .ok_or_else(|| anyhow!("Redirect response ({status}) has no Location header"))?
+                .to_str()
+                .context("Location header is not valid UTF-8")?
                 .to_string();
             let next = current
                 .join(&location)
@@ -483,9 +487,13 @@ fn safe_fetch(raw_url: &str, method_get: bool) -> Result<FetchOutcome> {
             current = validate_url_safe(next.as_str())?; // re-validate on every hop — prevents SSRF bypass
             continue;
         }
-        let content_type = resp.header("Content-Type").map(|s| s.to_string());
+        let content_type = resp
+            .headers()
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         let body = if method_get {
-            Some(read_bounded(resp, MAX_BODY_BYTES)?)
+            Some(read_bounded(resp.into_body(), MAX_BODY_BYTES)?)
         } else {
             None
         };
