@@ -694,10 +694,22 @@ fn verify_citation(
 /// originally filled in is kept only for reference in `llm_citation_status` (#4) — treats the
 /// evidence field as the "quoted text" and checks it against the actual source (the finding
 /// schema has no separate quote field, so evidence is used as a stand-in).
+///
+/// `llm_citation_status` is only backfilled from `citation_status` the first time (when it's
+/// still empty, i.e. a fresh finding from this round's own lens/discourse pass whose
+/// `citation_status` still holds the LLM's original self-report). Findings reinserted via
+/// `--prior` (STILL_OPEN/REVERSED/UNKNOWN) are clones of a prior round's already-processed
+/// finding: their `citation_status` is already that prior round's *code-verified* value, not an
+/// LLM self-report, and their `llm_citation_status` already correctly holds the original report
+/// from whenever the finding was first raised. Without this guard, re-running verify_citations on
+/// a reinserted finding overwrites its genuine `llm_citation_status` with last round's
+/// code-verified `citation_status`, silently destroying the value this field exists to preserve.
 pub fn verify_citations(input: &Input, findings: &mut [Finding], skip: bool) {
     for f in findings.iter_mut() {
         let verified = verify_citation(input, &f.citation_ref, &f.evidence, skip);
-        f.llm_citation_status = f.citation_status.clone();
+        if f.llm_citation_status.is_empty() {
+            f.llm_citation_status = f.citation_status.clone();
+        }
         f.citation_status = verified.label().to_string();
     }
 }
@@ -806,6 +818,63 @@ mod tests {
         assert!(validate_url_safe("http://127.0.0.1/admin").is_err());
         assert!(validate_url_safe("http://169.254.169.254/latest/meta-data/").is_err());
         assert!(validate_url_safe("http://192.168.0.1/").is_err());
+    }
+
+    fn test_input() -> Input {
+        Input {
+            document: String::new(),
+            sections: Vec::new(),
+            word_count: 0,
+            citations: Vec::new(),
+            requirements: None,
+            conventions: None,
+            deterministic_results: None,
+        }
+    }
+
+    fn test_finding(id: &str, citation_status: &str, llm_citation_status: &str) -> Finding {
+        Finding {
+            id: id.to_string(),
+            section: "sec".to_string(),
+            citation_ref: "1".to_string(),
+            claim: "claim".to_string(),
+            evidence: "evidence".to_string(),
+            impact: String::new(),
+            severity: "P1".to_string(),
+            label: "x".to_string(),
+            confidence: "medium".to_string(),
+            recommendation: String::new(),
+            lens: "lens_a".to_string(),
+            reviewer: String::new(),
+            citation_status: citation_status.to_string(),
+            llm_citation_status: llm_citation_status.to_string(),
+        }
+    }
+
+    /// A fresh finding from this round's own lens/discourse pass has `llm_citation_status` still
+    /// empty and `citation_status` holding the LLM's self-report — verify_citations should move
+    /// that self-report into `llm_citation_status` before overwriting `citation_status` with the
+    /// code-verified value.
+    #[test]
+    fn verify_citations_backfills_llm_citation_status_for_fresh_findings() {
+        let mut findings = vec![test_finding("f1", "CONTRADICTED", "")];
+        verify_citations(&test_input(), &mut findings, true);
+        assert_eq!(findings[0].llm_citation_status, "CONTRADICTED");
+        assert_eq!(findings[0].citation_status, "UNFETCHED");
+    }
+
+    /// A finding reinserted via `--prior` (STILL_OPEN/REVERSED/UNKNOWN) is a clone of a prior
+    /// round's already-processed finding: `citation_status` already holds *that* round's
+    /// code-verified value (not an LLM self-report), and `llm_citation_status` already correctly
+    /// holds the original self-report from whenever the finding was first raised. Re-running
+    /// verify_citations on it must recompute `citation_status` without clobbering the genuine
+    /// `llm_citation_status` with the stale code-verified value.
+    #[test]
+    fn verify_citations_preserves_llm_citation_status_on_reinsertion() {
+        let mut findings = vec![test_finding("f1-still-open-r2", "UNFETCHED", "UNVERIFIED")];
+        verify_citations(&test_input(), &mut findings, true);
+        assert_eq!(findings[0].llm_citation_status, "UNVERIFIED");
+        assert_eq!(findings[0].citation_status, "UNFETCHED");
     }
 
     #[test]
