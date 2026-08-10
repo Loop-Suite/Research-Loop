@@ -103,4 +103,31 @@ mod tests {
         let doc = "## Section\nsome normal text, no backticks here.";
         assert_eq!(escape_fence(doc), doc);
     }
+
+    /// Unicode extremes (RTL Arabic, an emoji, stacked combining diacritics) placed directly
+    /// adjacent to a backtick run must not panic on char-boundary slicing (the regex crate is
+    /// UTF-8-boundary-safe by construction, but this pins that guarantee for this specific
+    /// function/input shape), and the backtick run must still be broken up exactly as it would
+    /// be with plain ASCII around it — the surrounding unicode text must survive unmodified.
+    #[test]
+    fn escape_fence_handles_unicode_extremes_adjacent_to_backticks() {
+        let doc = "\u{645}\u{631}\u{62d}\u{628}\u{627}```\u{1f600}e\u{0301}\u{0301}\u{0301}test";
+        let escaped = escape_fence(doc);
+        assert!(
+            !escaped.contains("```"),
+            "a backtick run directly adjacent to unicode text must still be broken up: {escaped:?}"
+        );
+        assert!(
+            escaped.contains('\u{645}'),
+            "surrounding RTL text must be preserved: {escaped:?}"
+        );
+        assert!(
+            escaped.contains('\u{1f600}'),
+            "surrounding emoji must be preserved: {escaped:?}"
+        );
+        assert!(
+            escaped.contains("e\u{0301}\u{0301}\u{0301}"),
+            "combining diacritics must be preserved: {escaped:?}"
+        );
+    }
 }

@@ -204,4 +204,80 @@ mod tests {
             "unexpected error message: {err}"
         );
     }
+
+    /// Corrupted/non-UTF8 input must fail cleanly, not panic — e.g. a document saved with the
+    /// wrong encoding, or truncated mid-multibyte-sequence.
+    #[test]
+    fn read_capped_rejects_invalid_utf8() {
+        let path = temp_path("invalid_utf8");
+        // 0xFF is never valid as a UTF-8 lead byte.
+        std::fs::write(&path, [0xFFu8, 0x00, 0x01, 0x02]).unwrap();
+        let result = read_to_string_capped_with_limit(&path, 1024);
+        let _ = std::fs::remove_file(&path);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not valid UTF-8"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_empty_document() {
+        let path = temp_path("empty_doc.md");
+        std::fs::write(&path, "").unwrap();
+        let result = normalize(&path, &None, &None, &None);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "an empty document must be rejected");
+    }
+
+    #[test]
+    fn normalize_rejects_whitespace_only_document() {
+        let path = temp_path("blank_doc.md");
+        std::fs::write(&path, "   \n\t\n   \n").unwrap();
+        let result = normalize(&path, &None, &None, &None);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            result.is_err(),
+            "a whitespace-only document must be rejected"
+        );
+    }
+
+    /// Unicode extremes (RTL Arabic/Hebrew, an emoji ZWJ sequence, stacked combining
+    /// diacritics) mixed directly into headings/citations/body text must not panic anywhere in
+    /// the extract_sections/extract_citations/word_count path (all of which do byte-offset
+    /// string work via regex) and must still parse structurally correctly.
+    #[test]
+    fn normalize_handles_unicode_extremes_without_panicking() {
+        let doc = "## \u{645}\u{631}\u{62d}\u{628}\u{627} (Arabic heading)\n\
+            Family emoji ZWJ sequence: \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}\n\
+            Combining diacritics: e\u{0301}\u{0301}\u{0301} (e + combining acute x3)\n\
+            \u{5e2}\u{5d1}\u{5e8}\u{5d9}\u{5ea} (Hebrew) citation [\u{1f4ce}](https://example.com/a)\n";
+        let path = temp_path("unicode_extreme_doc.md");
+        std::fs::write(&path, doc).unwrap();
+        let result = normalize(&path, &None, &None, &None);
+        let _ = std::fs::remove_file(&path);
+        let inp = result.expect("a unicode-heavy document must parse without panicking");
+        assert_eq!(inp.sections.len(), 1);
+        assert_eq!(inp.citations.len(), 1);
+        assert_eq!(inp.citations[0].url, "https://example.com/a");
+    }
+
+    /// A `--deterministic-results` file that isn't even syntactically valid JSON must fail
+    /// cleanly through normalize()'s serde_json::from_str, not panic.
+    #[test]
+    fn normalize_rejects_malformed_deterministic_results_json() {
+        let doc_path = temp_path("doc_for_malformed_det.md");
+        std::fs::write(&doc_path, "## Section\nSome content.\n").unwrap();
+        let det_path = temp_path("malformed_det.json");
+        std::fs::write(&det_path, "{ this is not valid json").unwrap();
+
+        let result = normalize(&doc_path, &None, &None, &Some(det_path.clone()));
+
+        let _ = std::fs::remove_file(&doc_path);
+        let _ = std::fs::remove_file(&det_path);
+        assert!(
+            result.is_err(),
+            "malformed deterministic-results JSON must be rejected, not panic"
+        );
+    }
 }

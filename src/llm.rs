@@ -729,4 +729,80 @@ mod tests {
             "unexpected error message: {err}"
         );
     }
+
+    /// Writes a fake `claude` replacement script that drains stdin then runs `body`, and returns
+    /// its path (caller is responsible for removing it).
+    fn write_fake_claude_script(tag: &str, body: &str) -> std::path::PathBuf {
+        let mut script_path = std::env::temp_dir();
+        script_path.push(format!(
+            "research_loop_fake_claude_{tag}_{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(&script_path, format!("#!/bin/sh\ncat >/dev/null\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        script_path
+    }
+
+    /// Subprocess failure simulation: `claude` exits non-zero (e.g. not authenticated, invalid
+    /// flag, crashed). Must surface a clean error including the stderr message, not panic and
+    /// not silently treat it as success.
+    #[test]
+    fn call_claude_returns_clean_error_on_nonzero_exit() {
+        let script_path = write_fake_claude_script(
+            "nonzero_exit",
+            "echo 'not authenticated: run `claude login`' >&2\nexit 1",
+        );
+        let bin = script_path.to_string_lossy().to_string();
+
+        let result = call_claude(
+            &bin,
+            None,
+            Some("ctx"),
+            "task",
+            None,
+            Duration::from_secs(5),
+        );
+
+        let _ = std::fs::remove_file(&script_path);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exited with code"),
+            "unexpected error message: {err}"
+        );
+        assert!(
+            err.contains("not authenticated"),
+            "stderr should be surfaced in the error: {err}"
+        );
+    }
+
+    /// Subprocess failure simulation: `claude` exits 0 but its stdout isn't the expected
+    /// `{"result": "..."}` JSON envelope at all (a corrupted/unexpected CLI output shape, not
+    /// just a code-fence-wrapped result — extract_json's fence-stripping doesn't apply here,
+    /// since this is the outer claude-CLI JSON parse, not the inner LLM response parse). Must
+    /// return a clean error, not panic.
+    #[test]
+    fn call_claude_returns_clean_error_on_non_json_stdout() {
+        let script_path = write_fake_claude_script("non_json", "printf 'not json at all'");
+        let bin = script_path.to_string_lossy().to_string();
+
+        let result = call_claude(
+            &bin,
+            None,
+            Some("ctx"),
+            "task",
+            None,
+            Duration::from_secs(5),
+        );
+
+        let _ = std::fs::remove_file(&script_path);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to parse claude JSON output"),
+            "unexpected error message: {err}"
+        );
+    }
 }
