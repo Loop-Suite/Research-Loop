@@ -53,6 +53,11 @@ struct Cli {
     cheap_model: Option<String>,
     #[arg(long, default_value_t = 2, global = true)]
     retries: u32,
+    /// #18: per-call timeout (seconds) for both backends (claude CLI subprocess / OpenRouter
+    /// HTTP). A hung backend is killed/aborted and reported as an error instead of blocking the
+    /// run forever.
+    #[arg(long, default_value_t = llm::DEFAULT_LLM_TIMEOUT_SECS, global = true)]
+    timeout_secs: u64,
     #[arg(long, global = true)]
     verbose: bool,
 
@@ -152,6 +157,7 @@ fn main() {
 fn build_llm(cli: &Cli) -> Result<(Llm, Llm)> {
     let usage = Llm::new_usage_tracker();
     let cheap_model = cli.cheap_model.clone().or_else(|| cli.model.clone());
+    let timeout = std::time::Duration::from_secs(cli.timeout_secs);
     let (main_llm, cheap_llm) = match cli.backend {
         Backend::Claude => (
             Llm::claude_cli(
@@ -160,18 +166,22 @@ fn build_llm(cli: &Cli) -> Result<(Llm, Llm)> {
                 cli.retries,
                 cli.verbose,
                 usage.clone(),
-            ),
+            )
+            .with_timeout(timeout),
             Llm::claude_cli(
                 cli.claude_bin.clone(),
                 cheap_model,
                 cli.retries,
                 cli.verbose,
                 usage.clone(),
-            ),
+            )
+            .with_timeout(timeout),
         ),
         Backend::Openrouter => (
-            Llm::openrouter(cli.model.clone(), cli.retries, cli.verbose, usage.clone())?,
-            Llm::openrouter(cheap_model, cli.retries, cli.verbose, usage.clone())?,
+            Llm::openrouter(cli.model.clone(), cli.retries, cli.verbose, usage.clone())?
+                .with_timeout(timeout),
+            Llm::openrouter(cheap_model, cli.retries, cli.verbose, usage.clone())?
+                .with_timeout(timeout),
         ),
     };
     Ok((main_llm, cheap_llm))

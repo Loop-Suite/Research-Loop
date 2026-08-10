@@ -1,10 +1,17 @@
 use anyhow::{anyhow, Context, Result};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 pub const OPENROUTER_DEFAULT_MODEL: &str = "openai/gpt-oss-120b";
+
+/// #18: default per-call timeout for both backends. Generous enough for a slow real call over a
+/// large document/context, but finite — without this, a wedged `claude` subprocess or a stalled
+/// OpenRouter connection blocks the entire run forever with no way to recover. Overridable via
+/// `--timeout-secs` / [`Llm::with_timeout`].
+pub const DEFAULT_LLM_TIMEOUT_SECS: u64 = 300;
 
 /// LLM call backend. ClaudeCli = `claude -p` subprocess, OpenRouter = REST API.
 #[derive(Clone, Debug)]
@@ -54,6 +61,7 @@ struct CallUsage {
     cost_usd: f64,
 }
 
+#[derive(Debug)]
 struct CallResult {
     text: String,
     usage: CallUsage,
@@ -65,6 +73,9 @@ pub struct Llm {
     pub model: Option<String>,
     pub retries: u32,
     pub verbose: bool,
+    /// #18: per-call timeout applied to both backends. Defaults to [`DEFAULT_LLM_TIMEOUT_SECS`];
+    /// override with [`Llm::with_timeout`].
+    pub timeout: Duration,
     usage: Arc<Mutex<Usage>>,
 }
 
@@ -86,6 +97,7 @@ impl Llm {
             model,
             retries,
             verbose,
+            timeout: Duration::from_secs(DEFAULT_LLM_TIMEOUT_SECS),
             usage,
         }
     }
@@ -105,8 +117,15 @@ impl Llm {
             model: Some(model.unwrap_or_else(|| OPENROUTER_DEFAULT_MODEL.to_string())),
             retries,
             verbose,
+            timeout: Duration::from_secs(DEFAULT_LLM_TIMEOUT_SECS),
             usage,
         })
+    }
+
+    /// #18: overrides the default per-call timeout (e.g. from `--timeout-secs`).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Snapshot of usage accumulated so far (from the shared tracker). If another thread
@@ -128,11 +147,16 @@ impl Llm {
     fn call_once(&self, ctx: Option<&str>, task: &str, system: Option<&str>) -> Result<CallResult> {
         match &self.provider {
             Provider::ClaudeCli { bin } => {
-                call_claude(bin, self.model.as_deref(), ctx, task, system)
+                call_claude(bin, self.model.as_deref(), ctx, task, system, self.timeout)
             }
-            Provider::OpenRouter { api_key } => {
-                call_openrouter(api_key, self.model.as_deref(), ctx, task, system)
-            }
+            Provider::OpenRouter { api_key } => call_openrouter(
+                api_key,
+                self.model.as_deref(),
+                ctx,
+                task,
+                system,
+                self.timeout,
+            ),
         }
     }
 
@@ -290,12 +314,18 @@ impl Llm {
 /// The prompt is passed via stdin (to avoid argument length limits). Since this is a
 /// subprocess call, caching doesn't apply, so ctx+task are simply concatenated
 /// (order only: stable context first, variable instruction last).
+///
+/// #18: no step here blocks without a bound. Writing stdin, reading stdout/stderr, and waiting
+/// for exit each run on their own thread (or a polling loop), so a `claude` process that hangs
+/// (stuck auth prompt, stalled network, wedged internally, etc.) is killed and reported as a
+/// timeout error instead of blocking the whole run forever.
 fn call_claude(
     bin: &str,
     model: Option<&str>,
     ctx: Option<&str>,
     task: &str,
     system: Option<&str>,
+    timeout: Duration,
 ) -> Result<CallResult> {
     let mut cmd = Command::new(bin);
     cmd.arg("-p").arg("--output-format").arg("json");
@@ -318,13 +348,21 @@ fn call_claude(
     // 16-64KB) fills up and the child blocks on its own write — while this thread would still be
     // blocked writing ctx+task (shared_context embeds the *entire* research document, easily
     // hundreds of KB) to stdin, with nothing yet reading stdout/stderr to unblock it. That's a
-    // classic std::process deadlock. Spawning the write onto its own thread lets
-    // wait_with_output() below start draining stdout/stderr concurrently with the write, so
-    // neither side can starve the other.
+    // classic std::process deadlock (#4). Spawning the write onto its own thread lets the
+    // stdout/stderr reader threads below drain concurrently with the write, so neither side can
+    // starve the other.
     let mut stdin = child
         .stdin
         .take()
         .ok_or_else(|| anyhow!("failed to open stdin"))?;
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to open stdout"))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to open stderr"))?;
     let ctx_owned = ctx.map(|c| c.to_string());
     let task_owned = task.to_string();
     let writer = std::thread::spawn(move || -> std::io::Result<()> {
@@ -334,20 +372,62 @@ fn call_claude(
         stdin.write_all(task_owned.as_bytes())
         // stdin dropped here at the end of the closure, closing it and sending EOF to the child.
     });
+    let stdout_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        stdout_pipe.read_to_end(&mut buf)?;
+        Ok(buf)
+    });
+    let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        stderr_pipe.read_to_end(&mut buf)?;
+        Ok(buf)
+    });
 
-    let out = child.wait_with_output()?;
+    // #18: poll for exit with a deadline instead of a blocking wait — `wait_with_output()` (the
+    // previous approach) has no way to bound how long it blocks. If the deadline passes first,
+    // kill the child; that closes its end of the stdout/stderr pipes, so the reader threads above
+    // unblock with whatever partial output exists (which we discard) instead of hanging too.
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = writer.join();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(anyhow!(
+                "claude did not respond within {}s and was killed (check that `{bin}` is \
+                 installed, authenticated, and reachable — override with --timeout-secs if a \
+                 longer-running call is expected)",
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let stdout_buf = stdout_reader
+        .join()
+        .map_err(|_| anyhow!("stdout reader thread panicked"))?
+        .context("failed to read claude's stdout")?;
+    let stderr_buf = stderr_reader
+        .join()
+        .map_err(|_| anyhow!("stderr reader thread panicked"))?
+        .context("failed to read claude's stderr")?;
     writer
         .join()
         .map_err(|_| anyhow!("stdin writer thread panicked"))?
         .context("failed to write prompt to claude's stdin")?;
-    if !out.status.success() {
+    if !status.success() {
         return Err(anyhow!(
             "claude exited with code {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            status.code(),
+            String::from_utf8_lossy(&stderr_buf).trim()
         ));
     }
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stdout = String::from_utf8_lossy(&stdout_buf).to_string();
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).with_context(|| {
         format!(
             "failed to parse claude JSON output: {}",
@@ -409,6 +489,7 @@ fn call_openrouter(
     ctx: Option<&str>,
     task: &str,
     system: Option<&str>,
+    timeout: Duration,
 ) -> Result<CallResult> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Some(s) = system {
@@ -440,9 +521,13 @@ fn call_openrouter(
     // body) in favor of Error::StatusCode(u16) alone. To keep the same error message shape
     // (status + response body), we disable automatic http-status-as-error and check the
     // status ourselves, reading the body before it's dropped.
+    // #18: timeout_global bounds a stalled connection/response the same way checks.rs's
+    // safe_fetch already does for citation/dead-link HTTP calls — previously unset here, so a
+    // stalled OpenRouter request could hang the run forever with no way to recover.
     let mut resp = ureq::post(OPENROUTER_URL)
         .config()
         .http_status_as_error(false)
+        .timeout_global(Some(timeout))
         .build()
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
@@ -540,7 +625,6 @@ pub fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     /// Regression test for a classic std::process pipe deadlock: `call_claude` used to write
     /// ctx+task to the child's stdin synchronously, in the same thread, before anything started
@@ -573,7 +657,14 @@ mod tests {
 
         let (tx, rx) = mpsc::channel::<()>();
         std::thread::spawn(move || {
-            let _ = call_claude(&bin, None, Some(&big_ctx), "task", None);
+            let _ = call_claude(
+                &bin,
+                None,
+                Some(&big_ctx),
+                "task",
+                None,
+                Duration::from_secs(10),
+            );
             let _ = tx.send(());
         });
 
@@ -583,6 +674,59 @@ mod tests {
             finished,
             "call_claude did not return within 15s — likely deadlocked writing a large ctx to \
              stdin while the child wrote to stdout before draining stdin"
+        );
+    }
+
+    /// Regression test for issue #18: previously `call_claude` had no timeout at all —
+    /// `wait_with_output()` blocked forever on a child that never exits (stuck auth prompt,
+    /// stalled network, wedged process, etc.). Simulated with a fake `claude` that drains stdin
+    /// (so this isn't the #4 deadlock) and then sleeps far longer than the configured timeout.
+    /// Asserts the call returns an error well within a generous wall-clock bound instead of
+    /// hanging for the child's full sleep duration.
+    #[test]
+    fn call_claude_returns_timeout_error_instead_of_hanging_forever() {
+        let mut script_path = std::env::temp_dir();
+        script_path.push(format!(
+            "research_loop_fake_claude_hang_{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\ncat >/dev/null\nsleep 300\nprintf '{\"result\":\"too late\"}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let bin = script_path.to_string_lossy().to_string();
+        let (tx, rx) = mpsc::channel::<std::result::Result<CallResult, String>>();
+        std::thread::spawn(move || {
+            let result = call_claude(
+                &bin,
+                None,
+                Some("ctx"),
+                "task",
+                None,
+                Duration::from_millis(300),
+            )
+            .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+
+        // The child sleeps for 300s; a wall-clock bound far below that proves the timeout (not
+        // the child eventually exiting) is what ended the call.
+        let outcome = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("call_claude did not return within 10s — the 300ms timeout did not fire");
+        let _ = std::fs::remove_file(&script_path);
+
+        let err = outcome.expect_err("a child that never exits must produce a timeout error");
+        assert!(
+            err.contains("did not respond within"),
+            "unexpected error message: {err}"
         );
     }
 }
