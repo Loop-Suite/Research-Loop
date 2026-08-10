@@ -421,22 +421,29 @@ fn call_claude(
             break status;
         }
         if Instant::now() >= deadline {
+            eprintln!("[llm debug] deadline hit, entering kill branch");
             // #29: kill the whole process group (the child is its own group leader, see spawn
             // above), not just the direct child — a grandchild process would otherwise survive
             // and keep the stdout/stderr pipes open, hanging the reader threads below forever.
             #[cfg(unix)]
             {
                 let pgid = child.id();
-                let _ = Command::new("kill")
+                let kill_status = Command::new("kill")
                     .arg("-KILL")
                     .arg(format!("-{pgid}"))
                     .status();
+                eprintln!("[llm debug] pgid kill status: {kill_status:?}");
             }
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = writer_rx.recv_timeout(DRAIN_TIMEOUT);
-            let _ = stdout_rx.recv_timeout(DRAIN_TIMEOUT);
-            let _ = stderr_rx.recv_timeout(DRAIN_TIMEOUT);
+            let ck = child.kill();
+            eprintln!("[llm debug] child.kill() -> {ck:?}");
+            let cw = child.wait();
+            eprintln!("[llm debug] child.wait() -> {cw:?}");
+            let wr = writer_rx.recv_timeout(DRAIN_TIMEOUT);
+            eprintln!("[llm debug] writer_rx drained: {}", wr.is_ok());
+            let outr = stdout_rx.recv_timeout(DRAIN_TIMEOUT);
+            eprintln!("[llm debug] stdout_rx drained: {}", outr.is_ok());
+            let errr = stderr_rx.recv_timeout(DRAIN_TIMEOUT);
+            eprintln!("[llm debug] stderr_rx drained: {}", errr.is_ok());
             return Err(anyhow!(
                 "claude did not respond within {}s and was killed (check that `{bin}` is \
                  installed, authenticated, and reachable — override with --timeout-secs if a \
