@@ -396,16 +396,9 @@ fn call_claude(
         let _ = writer_tx.send(result);
     });
     std::thread::spawn(move || {
-        eprintln!("[llm debug] stdout_reader thread started");
         let mut buf = Vec::new();
-        let result = stdout_pipe.read_to_end(&mut buf);
-        eprintln!(
-            "[llm debug] stdout_reader read_to_end -> {:?} (len {})",
-            result.as_ref().map(|_| ()),
-            buf.len()
-        );
-        let send_res = stdout_tx.send(result.map(|_| buf));
-        eprintln!("[llm debug] stdout_reader send -> {:?}", send_res.is_ok());
+        let result = stdout_pipe.read_to_end(&mut buf).map(|_| buf);
+        let _ = stdout_tx.send(result);
     });
     std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -414,9 +407,18 @@ fn call_claude(
     });
 
     // How long to wait for the reader/writer threads to report back once we know the child is
-    // no longer running (either it exited on its own, or we just killed it). Generous enough for
-    // a cooperative pipe close under normal load, but still finite.
-    const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+    // no longer running (either it exited on its own, or we just killed it). In the normal-exit
+    // path the child is already dead, so its pipe write-ends are already closed and this should
+    // resolve near-instantly. In the timeout/kill path, this is a *second* line of defense on
+    // top of the process-group kill above: on at least one real runner, a process-group SIGKILL
+    // was observed to reliably kill the direct child but not a grandchild it had already forked,
+    // which kept holding the stdout/stderr pipe write-ends open and left `read_to_end()` blocked
+    // indefinitely even though the direct child was confirmed dead. Since a kill signal to the
+    // group is therefore not something we can fully trust to succeed, keep this short and treat
+    // a drain that doesn't finish in time as "give up and move on" rather than "wait longer" —
+    // the thread is left running in the background (a minor resource leak until it eventually
+    // unblocks or the process exits) rather than let it hang the whole call.
+    const DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
 
     // #18: poll for exit with a deadline instead of a blocking wait — `wait_with_output()` (the
     // previous approach) has no way to bound how long it blocks. If the deadline passes first,
@@ -428,29 +430,25 @@ fn call_claude(
             break status;
         }
         if Instant::now() >= deadline {
-            eprintln!("[llm debug] deadline hit, entering kill branch");
             // #29: kill the whole process group (the child is its own group leader, see spawn
             // above), not just the direct child — a grandchild process would otherwise survive
             // and keep the stdout/stderr pipes open, hanging the reader threads below forever.
+            // Not fully trustworthy on its own (see DRAIN_TIMEOUT above), but still worth doing:
+            // it succeeds in the common case and only the rarer grandchild-survives case falls
+            // through to the drain timeout.
             #[cfg(unix)]
             {
                 let pgid = child.id();
-                let kill_status = Command::new("kill")
+                let _ = Command::new("kill")
                     .arg("-KILL")
                     .arg(format!("-{pgid}"))
                     .status();
-                eprintln!("[llm debug] pgid kill status: {kill_status:?}");
             }
-            let ck = child.kill();
-            eprintln!("[llm debug] child.kill() -> {ck:?}");
-            let cw = child.wait();
-            eprintln!("[llm debug] child.wait() -> {cw:?}");
-            let wr = writer_rx.recv_timeout(DRAIN_TIMEOUT);
-            eprintln!("[llm debug] writer_rx drained: {}", wr.is_ok());
-            let outr = stdout_rx.recv_timeout(DRAIN_TIMEOUT);
-            eprintln!("[llm debug] stdout_rx drained: {}", outr.is_ok());
-            let errr = stderr_rx.recv_timeout(DRAIN_TIMEOUT);
-            eprintln!("[llm debug] stderr_rx drained: {}", errr.is_ok());
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = writer_rx.recv_timeout(DRAIN_TIMEOUT);
+            let _ = stdout_rx.recv_timeout(DRAIN_TIMEOUT);
+            let _ = stderr_rx.recv_timeout(DRAIN_TIMEOUT);
             return Err(anyhow!(
                 "claude did not respond within {}s and was killed (check that `{bin}` is \
                  installed, authenticated, and reachable — override with --timeout-secs if a \
