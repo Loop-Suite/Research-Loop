@@ -13,11 +13,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      matrix:
+        # MSRV (declared in Cargo.toml's rust-version) alongside stable -- stable alone never
+        # actually verifies the declared MSRV still builds; a change using a post-1.70
+        # stdlib/language feature would pass CI while silently breaking anyone pinned to it.
+        rust: ["1.70", stable]
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
       - name: Rust format
+        if: matrix.rust == 'stable'
         run: cargo fmt --all -- --check
       - name: Cargo check
         run: cargo check --workspace --all-targets
