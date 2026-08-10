@@ -485,14 +485,11 @@ fn run_lens_critic_call(
         .cloned()
         .collect();
     let prompt = build_moves_prompt_for_lens(spec, &others, resolved, round, acting_lens);
-    let mv = llm
-        .json(&prompt, Some(DISCOURSE_MOVES_SYSTEM))
+    let mut mr: MovesRound = llm
+        .json_typed(&prompt, Some(DISCOURSE_MOVES_SYSTEM))
         .with_context(|| {
             format!("discourse round {round} lens '{acting_lens}' critic call failed")
         })?;
-    let mut mr: MovesRound = serde_json::from_value(mv).with_context(|| {
-        format!("discourse round {round} lens '{acting_lens}' moves JSON schema mismatch")
-    })?;
     for m in mr.moves.iter_mut() {
         m.lens = acting_lens.to_string();
     }
@@ -537,11 +534,9 @@ fn run_round_call(
     };
 
     let res_prompt = build_resolutions_prompt(findings, resolved, round, &all_moves);
-    let rv = llm
-        .json(&res_prompt, Some(DISCOURSE_ADJUDICATE_SYSTEM))
+    let rr: ResolutionsRound = llm
+        .json_typed(&res_prompt, Some(DISCOURSE_ADJUDICATE_SYSTEM))
         .with_context(|| format!("discourse round {round} resolutions stage failed"))?;
-    let rr: ResolutionsRound = serde_json::from_value(rv)
-        .with_context(|| format!("discourse round {round} resolutions JSON schema mismatch"))?;
 
     Ok(DiscourseRound {
         moves: all_moves,

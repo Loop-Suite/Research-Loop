@@ -166,11 +166,9 @@ pub fn review_lens(llm: &Llm, spec: &Spec, input: &Input, lens_id: &str) -> Resu
     let ctx = shared_context(spec, input);
     let task = build_review_task(spec, &lens.title, &lens.guide);
     let system = persona_system(lens);
-    let v = llm
-        .json_ctx(Some(&ctx), &task, Some(&system))
+    let mut out: LensOutput = llm
+        .json_ctx_typed(Some(&ctx), &task, Some(&system))
         .with_context(|| format!("Lens review failed: {lens_id}"))?;
-    let mut out: LensOutput = serde_json::from_value(v)
-        .with_context(|| format!("Lens review JSON schema mismatch: {lens_id}"))?;
     let reviewer = if lens.persona_name.is_empty() {
         lens.title.clone()
     } else {
@@ -199,10 +197,8 @@ pub fn review_good_things(llm: &Llm, spec: &Spec, input: &Input) -> Result<GoodT
          If there is no concrete example to cite as evidence, return good_things as an empty array.\n",
         guide = GOOD_THINGS_GUIDE,
     );
-    let v = llm
-        .json_ctx(Some(&ctx), &task, Some(LENS_SYSTEM))
+    let out: GoodThingsOutput = llm
+        .json_ctx_typed(Some(&ctx), &task, Some(LENS_SYSTEM))
         .context("Good Things lens failed")?;
-    let out: GoodThingsOutput =
-        serde_json::from_value(v).context("Good Things JSON schema mismatch")?;
     Ok(out)
 }

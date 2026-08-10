@@ -168,12 +168,7 @@ impl Llm {
         Err(last.unwrap_or_else(|| anyhow!("unknown failure")))
     }
 
-    /// Forces a JSON response. Retries on parse failure.
-    pub fn json(&self, prompt: &str, system: Option<&str>) -> Result<serde_json::Value> {
-        self.json_ctx(None, prompt, system)
-    }
-
-    /// JSON-forcing variant of [`Llm::text_ctx`].
+    /// JSON-forcing variant of [`Llm::text_ctx`]. Retries on parse failure.
     pub fn json_ctx(
         &self,
         ctx: Option<&str>,
@@ -223,6 +218,67 @@ impl Llm {
                                 );
                             }
                         }
+                    }
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow!("JSON response failed")))
+    }
+
+    /// Forces a JSON response and deserializes it into `T`. Unlike calling [`Llm::json`] and
+    /// then `serde_json::from_value` separately, a response that parses as JSON but doesn't
+    /// match `T`'s schema (e.g. a missing required field) is retried up to `self.retries` times
+    /// just like a raw parse failure, instead of hard-failing the whole run on the first
+    /// response that deviates from the expected shape.
+    pub fn json_typed<T: serde::de::DeserializeOwned>(
+        &self,
+        prompt: &str,
+        system: Option<&str>,
+    ) -> Result<T> {
+        self.json_ctx_typed(None, prompt, system)
+    }
+
+    /// Typed, schema-retrying variant of [`Llm::json_ctx`]. See [`Llm::json_typed`].
+    pub fn json_ctx_typed<T: serde::de::DeserializeOwned>(
+        &self,
+        ctx: Option<&str>,
+        task: &str,
+        system: Option<&str>,
+    ) -> Result<T> {
+        let mut last: Option<anyhow::Error> = None;
+        for attempt in 0..=self.retries {
+            let raw = match self.call_once(ctx, task, system) {
+                Ok(r) => {
+                    self.record_usage(&r.usage);
+                    r.text
+                }
+                Err(e) => {
+                    last = Some(e);
+                    if self.verbose {
+                        eprintln!(
+                            "[json retry {}/{}] {}",
+                            attempt + 1,
+                            self.retries,
+                            last.as_ref().unwrap()
+                        );
+                    }
+                    continue;
+                }
+            };
+            let parsed = extract_json(&raw).and_then(|v| {
+                serde_json::from_value::<T>(v).map_err(|e| anyhow!("JSON schema mismatch: {e}"))
+            });
+            match parsed {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    last = Some(e);
+                    if self.verbose {
+                        eprintln!(
+                            "[json retry {}/{}] {}",
+                            attempt + 1,
+                            self.retries,
+                            last.as_ref().unwrap()
+                        );
                     }
                 }
             }

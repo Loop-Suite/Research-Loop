@@ -97,11 +97,9 @@ pub fn verify(
         req_list = req_list,
         fs = if findings_summary.is_empty() { "(none)".to_string() } else { findings_summary },
     );
-    let v = llm
-        .json_ctx(Some(&ctx), &task, Some(REQ_SYSTEM))
+    let out: AngleCheckOutput = llm
+        .json_ctx_typed(Some(&ctx), &task, Some(REQ_SYSTEM))
         .context("angle coverage verification failed")?;
-    let out: AngleCheckOutput =
-        serde_json::from_value(v).context("angle coverage JSON schema mismatch")?;
 
     // Deterministic cross-check: only trust req_ids the LLM returned that are in the list we gave it;
     // any REQ-ID missing from the response is forced to MISSING by the code — this prevents the model

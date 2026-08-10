@@ -30,10 +30,8 @@ pub fn run(llm: &Llm, spec: &Spec, input: &Input) -> Result<Describe> {
          \"key_findings\":[\"key finding per section/area, 1 line per item\"],\
          \"labels\":[\"the research-type/area this document covers\"],\
          \"can_be_split\":\"yes|no|unknown\",\"can_be_split_note\":\"rationale (e.g. can it be split by angle given the number of sections)\"}\n";
-    let v = llm
-        .json_ctx(Some(&ctx), task, Some(DESCRIBE_SYSTEM))
-        .context("describe failed")?;
-    serde_json::from_value(v).context("describe JSON schema mismatch")
+    llm.json_ctx_typed(Some(&ctx), task, Some(DESCRIBE_SYSTEM))
+        .context("describe failed")
 }
 
 /// Scans the document for "needs verification"-type markers. Deterministic (no LLM used).
