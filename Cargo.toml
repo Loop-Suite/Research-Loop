@@ -2,7 +2,7 @@
 name = "research-loop"
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 license = "Apache-2.0"
 repository = "https://github.com/Loop-Suite/research-loop"
 description = "Multi-persona review + discourse cross-examination CLI for validating market/competitor research documents"
