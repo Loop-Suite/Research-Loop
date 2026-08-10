@@ -1,6 +1,45 @@
 use anyhow::{Context, Result};
 use regex::Regex;
+use std::io::Read;
 use std::path::Path;
+
+/// #19: upper bound on any single input file (document/brief/style/deterministic-results).
+/// Reading these with plain `std::fs::read_to_string` had no size limit at all — a huge file
+/// (wrong path pointed at a large export/log by mistake) or a symlink to an infinite-but-valid-
+/// UTF-8 special file (e.g. `/dev/zero`, all NUL bytes) would be read fully into memory with no
+/// bound, risking OOM before `main.rs`'s DOC_WARN_CHARS check even gets a chance to run (that
+/// check only warns about cost, and only *after* the full read already succeeded). 64 MiB is
+/// far beyond any realistic research document/brief/style guide, but small enough to fail fast
+/// and cleanly instead of exhausting memory.
+const MAX_INPUT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Reads `path` with a hard byte cap instead of unconditional `std::fs::read_to_string`. Bounds
+/// worst-case memory regardless of the file's reported size or type (a cap alone isn't enough
+/// for special files whose metadata lies about length, so this bounds the actual bytes read via
+/// `Read::take`, not just a pre-check against `fs::metadata`).
+fn read_to_string_capped(path: &Path) -> Result<String> {
+    read_to_string_capped_with_limit(path, MAX_INPUT_FILE_BYTES)
+}
+
+/// `max_bytes`-parameterized so tests can exercise the cap without writing multi-megabyte fixture
+/// files. Production callers always go through [`read_to_string_capped`], which fixes
+/// `max_bytes` at [`MAX_INPUT_FILE_BYTES`].
+fn read_to_string_capped_with_limit(path: &Path, max_bytes: u64) -> Result<String> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open file: {}", path.display()))?;
+    let mut buf = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    anyhow::ensure!(
+        (buf.len() as u64) <= max_bytes,
+        "File exceeds the {max_bytes}-byte size limit: {} — refusing to read further to avoid \
+         unbounded memory use (this can also happen if the path is a symlink to a huge or \
+         special file)",
+        path.display()
+    );
+    String::from_utf8(buf).with_context(|| format!("File is not valid UTF-8: {}", path.display()))
+}
 
 /// A single citation (Markdown link) within the document.
 #[derive(Debug, Clone)]
@@ -28,11 +67,7 @@ pub struct Input {
 fn read_opt(p: &Option<std::path::PathBuf>) -> Result<Option<String>> {
     match p {
         None => Ok(None),
-        Some(path) => {
-            let s = std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read file: {}", path.display()))?;
-            Ok(Some(s))
-        }
+        Some(path) => Ok(Some(read_to_string_capped(path)?)),
     }
 }
 
@@ -62,7 +97,7 @@ pub fn normalize(
     conventions_path: &Option<std::path::PathBuf>,
     deterministic_results_path: &Option<std::path::PathBuf>,
 ) -> Result<Input> {
-    let document = std::fs::read_to_string(document_path).with_context(|| {
+    let document = read_to_string_capped(document_path).with_context(|| {
         format!(
             "Failed to read research document: {}",
             document_path.display()
@@ -79,7 +114,7 @@ pub fn normalize(
     let deterministic_results = match deterministic_results_path {
         None => None,
         Some(p) => {
-            let s = std::fs::read_to_string(p).with_context(|| {
+            let s = read_to_string_capped(p).with_context(|| {
                 format!("Failed to read deterministic results file: {}", p.display())
             })?;
             Some(serde_json::from_str(&s).with_context(|| {
@@ -100,4 +135,73 @@ pub fn normalize(
         conventions,
         deterministic_results,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "research_loop_input_test_{tag}_{}",
+            std::process::id()
+        ));
+        p
+    }
+
+    /// Regression test for issue #19: a file under the limit must still read normally.
+    #[test]
+    fn read_capped_succeeds_under_the_limit() {
+        let path = temp_path("under_limit");
+        std::fs::write(&path, "hello world").unwrap();
+        let result = read_to_string_capped_with_limit(&path, 100);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    /// Regression test for issue #19: previously `std::fs::read_to_string` had no size bound at
+    /// all, so an oversized file was read fully into memory before any check ran. A file one
+    /// byte over the limit must be rejected with a clear error instead.
+    #[test]
+    fn read_capped_rejects_a_file_one_byte_over_the_limit() {
+        let path = temp_path("over_limit");
+        std::fs::write(&path, "x".repeat(11)).unwrap();
+        let result = read_to_string_capped_with_limit(&path, 10);
+        let _ = std::fs::remove_file(&path);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("size limit"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn read_capped_accepts_a_file_exactly_at_the_limit() {
+        let path = temp_path("exact_limit");
+        std::fs::write(&path, "x".repeat(10)).unwrap();
+        let result = read_to_string_capped_with_limit(&path, 10);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap(), "x".repeat(10));
+    }
+
+    /// Regression test for issue #19's symlink-to-special-file scenario: `/dev/zero` is an
+    /// infinite (never-EOF) source of valid UTF-8 (NUL bytes) whose `fs::metadata().len()`
+    /// reports 0 — so a naive pre-check against metadata would not catch it. This proves the cap
+    /// is enforced on actual bytes read (via `Read::take`), so a symlink to `/dev/zero` fails
+    /// fast with a clear error instead of growing a buffer forever.
+    #[cfg(unix)]
+    #[test]
+    fn read_capped_terminates_on_symlink_to_dev_zero() {
+        let path = temp_path("symlink_to_dev_zero");
+        let _ = std::fs::remove_file(&path);
+        std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+        let result = read_to_string_capped_with_limit(&path, 1024);
+        let _ = std::fs::remove_file(&path);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("size limit"),
+            "unexpected error message: {err}"
+        );
+    }
 }
