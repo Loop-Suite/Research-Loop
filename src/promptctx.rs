@@ -1,5 +1,6 @@
 use crate::input::Input;
 use crate::spec::Spec;
+use regex::Regex;
 
 /// The context block shared by all LLM calls (research context, tone guide, brief, raw document).
 pub fn shared_context(spec: &Spec, input: &Input) -> String {
@@ -50,10 +51,56 @@ pub fn shared_context(spec: &Spec, input: &Input) -> String {
     c
 }
 
-/// Prevents a ``` sequence appearing inside the document from prematurely closing the enclosing
-/// code fence and escaping the "untrusted data" block. Inserts a zero-width space between the
-/// three backticks so rendering/readability stay almost unchanged while only the fence-closing
-/// sequence is broken.
+/// Prevents any run of 2+ backticks appearing inside the document from prematurely closing the
+/// enclosing code fence and escaping the "untrusted data" block. Inserts a zero-width space
+/// between *every* pair of adjacent backticks in a run, so no 2 (let alone 3) raw backticks are
+/// ever left contiguous, regardless of the run's original length — a naive `.replace("```", ...)`
+/// only handles runs whose length is an exact multiple of 3: a run of 4, 5, 7, 8, ... backticks
+/// (e.g. a document that itself nests a ``` example inside a ```` fence, a common Markdown
+/// technique) leaves a genuine "```" substring behind, which can still prematurely close the
+/// fence and defeat this defense. Rendering/readability stay almost unchanged since only the
+/// backtick adjacency, not the character count, is affected.
 fn escape_fence(doc: &str) -> String {
-    doc.replace("```", "`\u{200b}``")
+    let re = Regex::new("`{2,}").expect("failed to compile backtick-run regex");
+    re.replace_all(doc, |caps: &regex::Captures| {
+        caps[0]
+            .chars()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join("\u{200b}")
+    })
+    .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_fence_breaks_exact_triple_backtick_runs() {
+        let escaped = escape_fence("before```after");
+        assert!(!escaped.contains("```"));
+    }
+
+    /// The bug: a naive `.replace("```", ...)` only fully neutralizes runs whose length is an
+    /// exact multiple of 3 — a run of 4 backticks (one very plausible source: a document nesting
+    /// a ``` example inside an outer ```` fence, a common Markdown technique) leaves a real
+    /// "```" substring behind, which can prematurely close the untrusted_document fence.
+    #[test]
+    fn escape_fence_breaks_backtick_runs_of_any_length() {
+        for n in 2..=12 {
+            let doc = format!("before{}after", "`".repeat(n));
+            let escaped = escape_fence(&doc);
+            assert!(
+                !escaped.contains("```"),
+                "run of {n} backticks left a closable ``` fence marker: {escaped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_fence_leaves_non_backtick_text_untouched() {
+        let doc = "## Section\nsome normal text, no backticks here.";
+        assert_eq!(escape_fence(doc), doc);
+    }
 }
